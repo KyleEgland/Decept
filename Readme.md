@@ -1,4 +1,7 @@
 # Decept Proxy
+Project under re-construction
+
+## Original ReadMe contents
 
 Yay, another network proxy. What makes this any different from any others?
 

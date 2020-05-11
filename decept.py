@@ -1,9 +1,9 @@
 #!/usr/bin/env python2
-#------------------------------------------------------------------
+# ------------------------------------------------------------------
 # Author: Lilith Wyatt <(^,^)>
-#------------------------------------------------------------------
-# This is the main proxy, Decept Created with portability in mind, 
-# so you can set it and forget it, only uses as standard python libraries 
+# ------------------------------------------------------------------
+# This is the main proxy, Decept, created with portability in mind,
+# so you can set it and forget it, only uses as few standard python libraries
 # as possible.
 #
 # Can dump .fuzzer files too if you have mutiny_fuzzing_framework
@@ -17,7 +17,7 @@
 # - fuzzer file dumping for Mutiny
 # - L3 captures/proxying
 # - L2 captures/proxying
-#------------------------------------------------------------------
+# ------------------------------------------------------------------
 # Copyright (c) 2015-2017 by Cisco Systems, Inc.
 # All rights reserved.
 #
@@ -42,8 +42,7 @@
 # ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#------------------------------------------------------------------
-
+# ------------------------------------------------------------------
 import ssl
 import sys
 import socket
@@ -52,33 +51,35 @@ import select
 import multiprocessing
 
 try:
-    # windows 
-    import fcntl 
-except:
+    # windows
+    import fcntl
+except Exception as e:
+    print "Exception occurred: %s" % e
     pass
 
 try:
     # dtls
     from OpenSSL import SSL
     from OpenSSL import _util
-except:
+except Exception as e:
+    print "Exception occurred: %s" % e
     pass
 
 from ctypes import *
 from re import match
-from time import time,sleep
+from time import time, sleep
 from datetime import datetime
 
-from os.path import join,isfile,abspath
+from os.path import join, isfile, abspath
 from platform import system
-from os import mkdir,getcwd,remove
+from os import mkdir, getcwd, remove
 
 try:
-    sys.path.append(abspath(join(__file__,"../../mutiny_fuzzing_framework"))) 
+    sys.path.append(abspath(join(__file__, "../../mutiny_fuzzing_framework")))
     import backend.fuzzerdata as mutiny
 except ImportError:
     try:
-        sys.path.append(abspath(join(__file__, "../../mutiny-fuzzer"))) 
+        sys.path.append(abspath(join(__file__, "../../mutiny-fuzzer")))
         import backend.fuzzerdata as mutiny
     except ImportError:
         pass
@@ -87,34 +88,37 @@ DEBUGGING = False
 if '-d' in sys.argv:
     DEBUGGING = True
 
-    
-# minor hack to get decept to run on osx 
+
+# minor hack to get decept to run on osx
 if "darwin" in system().lower():
     socket.AF_PACKET = -1
 
+
 ##########
-#! <(^.^)>
+# <(^.^)>
 class DeceptProxy():
 
-    def __init__(self,lhost,lport,rhost,rport,local_end_type,remote_end_type,receive_first=False,
-                 local_cert=None,local_key=None):
+    def __init__(self, lhost, lport, rhost, rport, local_end_type,
+                 remote_end_type, receive_first=False, local_cert=None,
+                 local_key=None):
         self.lhost = lhost
         self.lport = lport
         self.rhost = rhost
         self.rport = rport
-        self.srcport = 0 #for UDP when we need src port to send back to locally 
+        # for UDP when we need src port to send back to locally
+        self.srcport = 0
         self.receive_first = receive_first
         self.local_end_type = local_end_type
         self.remote_end_type = remote_end_type
-        self.conn = True 
+        self.conn = True
         if "dtls" in local_end_type:
             output("Local DTLS sockets not supported yet, sorry (^_^);;;")
             sys.exit()
-            
-        self.output_lock = multiprocessing.Lock()    
+
+        self.output_lock = multiprocessing.Lock()
 
         if "udp" in local_end_type or "dtls" in local_end_type:
-            self.conn = False 
+            self.conn = False
         self.protocol_blueprints = None
         self.pkt_count = 0
         self.max_conns = 5
@@ -126,9 +130,9 @@ class DeceptProxy():
         # except if we get past expected_resp_count ^_^
         self.expected_resp_count = -1
 
-        self.udp_port_range = None 
+        self.udp_port_range = None
 
-        #! verify this
+        # TODO: verify this
         if "\\x00" in self.lhost:
             self.lhost = "\x00%s" % self.lhost
 
@@ -139,22 +143,22 @@ class DeceptProxy():
         self.rbind_port = 0
 
         # ssl options for those who care
-        
-        #killswitch for closing sockets
-        self.killswitch = multiprocessing.Event() 
+
+        # killswitch for closing sockets
+        self.killswitch = multiprocessing.Event()
 
         # Timeout for sockets
-        self.timeout = 1 
+        self.timeout = 1
 
-        # Max amount of data to send per packet for 
+        # Max amount of data to send per packet for
         # TCP-based protocols, inbound or outbound.
         self.l4_MTU = 30000
 
         # .fuzzer Options
         self.fuzz_file = ""
         self.fuzzerData = ""
-        
-        # assorted options 
+
+        # assorted options
         self.L3_raw = False
         self.dumpraw = ''
 
@@ -172,190 +176,224 @@ class DeceptProxy():
         self.pps = False
         self.snaplen = 65535
         self.pcap_interface = "eth0"
-        self.mon_flag = None 
+        self.mon_flag = None
 
         self.tapmode = False
-    
+
         self.hostconf_dict = {}
 
         self.poison_file = ""
         self.poison_int = "eth0"
-                        
-        self.local_certfile=local_cert
-        self.local_keyfile=local_key
-        
+
+        self.local_certfile = local_cert
+        self.local_keyfile = local_key
+
         # these will get overwritten with --rkey/--rcert options
         # if both are provided
-        self.remote_certfile=local_cert
-        self.remote_keyfile=local_key
-        self.remote_verify=""
+        self.remote_certfile = local_cert
+        self.remote_keyfile = local_key
+        self.remote_verify = ""
 
         self.remote_context = ssl.SSLContext(ssl.PROTOCOL_SSLv23)
         self.remote_context.verify_mode = ssl.CERT_NONE
         self.remote_context.check_hostname = False
-        
+
         # on successful import, these will be the imported
         # functions "inbound_hook()" and "outbound_hook()"
         self.inbound_hook = None
         self.outbound_hook = None
-    
+
         # Load SSL cert if creating local SSL prox
-        if self.local_end_type  == "ssl":
+        if self.local_end_type == "ssl":
             try:
-                self.server_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+                self.server_context = ssl.create_default_context(
+                    ssl.Purpose.CLIENT_AUTH
+                    )
                 if self.local_keyfile:
-                    self.server_context.load_cert_chain(certfile=self.local_certfile,keyfile=self.local_keyfile)
+                    self.server_context.load_cert_chain(
+                        certfile=self.local_certfile,
+                        keyfile=self.local_keyfile
+                    )
                 else:
-                    self.server_context.load_cert_chain(certfile=self.local_certfile)
+                    self.server_context.load_cert_chain(
+                        certfile=self.local_certfile
+                    )
             except Exception as e:
-                output("[x.x] Please generate keys before attempting to proxy ssl",RED)
-                output("[-_-] Protip: openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -nodes",CYAN)
-                output("[>_>] %s"%e,RED)
+                output(
+                    "[x.x] Please generate keys before attempting to proxy"
+                    " ssl",
+                    RED
+                )
+                output(
+                    "[-_-] Protip: openssl req -x509 -newkey rsa:2048 -keyout"
+                    " key.pem -out cert.pem -nodes",
+                    CYAN
+                )
+                output("[>_>] %s" % e, RED)
                 sys.exit(0)
 
-        elif self.local_end_type  == "dtls":
-            # DTLS made sorta possible by smarter people than I, thank you Mr. Concolato ^_^; 
-            # https://stackoverflow.com/questions/27383054/python-importerror-usr-local-lib-python2-7-lib-dynload-io-so-undefined-symb
-            # it's a hack and I can only get one side to work. Definiately a 'todo'.
+        elif self.local_end_type == "dtls":
+            # DTLS made sorta possible by smarter people than I, thank you
+            # Mr. Concolato ^_^;
+            # https://stackoverflow.com/questions/27383054/
+            # python-importerror-usr-local-lib-python2-7-lib-dynload-io-so-
+            # undefined-symb
+            # it's a hack and I can only get one side to work. Definiately a
+            # 'todo'.
             try:
-                DTLSv1_server_method = 7 
+                DTLSv1_server_method = 7
                 SSL.Context._methods[DTLSv1_server_method] = _util.lib.DTLSv1_server_method
-            except:
-                output("[x.x] Unable to import OpenSSL for DTLS!",RED) 
-                output("[-_-] Please install `apt-get install python-openssl` or `pip install PyOpenSSL`",RED) 
+            except Exception as e:
+                print "Exception occurred: %s" % e
+                output("[x.x] Unable to import OpenSSL for DTLS!", RED)
+                output(
+                    "[-_-] Please install `apt-get install python-openssl` or"
+                    " `pip install PyOpenSSL`",
+                    RED
+                )
 
             try:
                 self.server_context = SSL.Context(DTLSv1_server_method)
                 if self.local_keyfile:
                     self.server_context.use_privatekey_file(self.local_keyfile)
                 if self.local_certfile:
-                    self.server_context.use_certificate_file(self.local_certfile)
+                    self.server_context.use_certificate_file(
+                        self.local_certfile
+                    )
             except Exception as e:
-                output("[x.x] Please generate keys before attempting to proxy DTLS",RED)
-                output("[-_-] Protip: openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -nodes",CYAN)
-                output("[>_>] %s"%e,RED)
+                output(
+                    "[x.x] Please generate keys before attempting to proxy"
+                    " DTLS",
+                    RED
+                )
+                output(
+                    "[-_-] Protip: openssl req -x509 -newkey rsa:2048 -keyout"
+                    " key.pem -out cert.pem -nodes",
+                    CYAN
+                )
+                output("[>_>] %s" % e, RED)
                 sys.exit(0)
 
-
         if self.remote_end_type == "dtls":
-            DTLSv1_client_method = 8 
+            DTLSv1_client_method = 8
             SSL.Context._methods[DTLSv1_client_method] = _util.lib.DTLSv1_client_method
             self.remote_context = SSL.Context(DTLSv1_client_method)
-    
-
-###########################################################
-##End Decept() __init__()##################################
-###########################################################
+    ###########################################################
+    # End Decept() __init__() #################################
+    ###########################################################
 
     def shutdown(self):
         if self.local_end_type in ConnectionBased:
-            server_kill = self.socket_plinko(self.lhost,self.local_end_type)
+            server_kill = self.socket_plinko(self.lhost, self.local_end_type)
             if server_kill.type != socket.AF_UNIX:
-                server_kill.connect((self.lhost,self.lport))
+                server_kill.connect((self.lhost, self.lport))
                 server_kill.close()
             elif "unix" in self.local_end_type:
                 try:
                     remove(self.lhost)
-                except:
-                    output("[?.?] Unable to delete Unix Socket: %s"%self.lhost,YELLOW)
+                except Exception as e:
+                    print "Exception occurred: %s" % e
+                    output(
+                        "[?.?] Unable to delete Unix Socket: %s" % self.lhost,YELLOW
+                    )
 
         output("[^.^] Thanks for using Decept!")
         sys.exit()
 
-
-    def get_bytes(self,sock):
+    def get_bytes(self, sock):
         ret = ""
         retip = ""
         retport = -1
         sock.settimeout(self.timeout)
-        try: 
+        try:
             while True:
                 tmp = ""
                 if self.conn:
-                    tmp = sock.recv(65535)  
+                    tmp = sock.recv(65535)
                 else:
                     # necessary for connectionless
 
                     if self.local_end_type == "udp":
-                        ret_struct = sock.recvfrom(65535) 
+                        ret_struct = sock.recvfrom(65535)
                         try:
-                            tmp,(_,tmpport) = ret_struct 
+                            tmp, (_, tmpport) = ret_struct
                         except ValueError:
                             # ipv6 recvfrom gives more data
-                            tmp,(_,tmpport,_,_) = ret_struct 
-    
-                        if tmpport != self.lport and tmpport != self.rport and not self.srcport: 
+                            tmp, (_, tmpport, _, _) = ret_struct
+
+                        if tmpport != self.lport and tmpport != self.rport and not self.srcport:
                             self.lport = tmpport
                             self.lhost = _
                     elif self.local_end_type == "dtls":
-                        tmp,(retip,retport) = sock.recvfrom(65535)
-                       
-                if len(tmp): 
-                    ret+=tmp
+                        tmp, (retip, retport) = sock.recvfrom(65535)
+
+                if len(tmp):
+                    ret += tmp
                 else:
                     break
         except Exception as e:
-            #output(str(e),YELLOW)
+            print "Exception occurred: %s" % e
+            # output(str(e), YELLOW)
             pass
-    
-        if retip and (retport >= 0): 
-            return (ret,retip,retport)
 
-        return ret 
+        if retip and (retport >= 0):
+            return (ret, retip, retport)
+
+        return ret
 
     # Takes the host (1.1.2.1, FE80::1, ab:bc:cd:ef:ab:ea)
     # and endpoint type (tcp,ssl,unix,udp)
     # and returns the appropriate socket
-    def socket_plinko(self,host,endpoint):
-        s_fam = socket.AF_INET 
+    def socket_plinko(self, host, endpoint):
+        s_fam = socket.AF_INET
         s_proto = None
 
         if "stdin" in endpoint:
             return sys.stdin
         if "stdout" in endpoint:
             return sys.stdout
-    
-        if match(r'\d{1,3}(\.\d{1,3}){3}',host):
+
+        if match(r'\d{1,3}(\.\d{1,3}){3}', host):
             s_fam = socket.AF_INET
 
-        elif match(r'([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}',host):
+        elif match(r'([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}', host):
             if "darwin" in system().lower():
                 output("[x.x] RAW packet functionality in OSX not supported.")
                 sys.exit()
-            # Automatically raw. 
+            # Automatically raw.
             if endpoint == "passive":
                 # when we aren't bridging two interfaces
                 # 0x0300 => promiscuous mode
-                ret_socket = socket.socket(socket.AF_PACKET,socket.SOCK_RAW,0x0300) 
-            #endpoint == "bridge" 
-            else: 
-                ret_socket = socket.socket(socket.AF_PACKET,socket.SOCK_RAW) 
+                ret_socket = socket.socket(socket.AF_PACKET, socket.SOCK_RAW,
+                                           0x0300)
+            # endpoint == "bridge"
+            else:
+                ret_socket = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
             return ret_socket
 
-        elif match(r'([0-9A-Fa-f]{0,4}:?)(:[0-9A-Fa-f]{1,4}:?)+',host) and host.find("::") == host.rfind("::"):
-            #print repr(host)
-            s_fam = socket.AF_INET6 
-        
+        elif match(r'([0-9A-Fa-f]{0,4}:?)(:[0-9A-Fa-f]{1,4}:?)+', host) and host.find("::") == host.rfind("::"):
+            # print repr(host)
+            s_fam = socket.AF_INET6
+
         else:
-            s_fam = socket.AF_UNIX  
-        
+            s_fam = socket.AF_UNIX
 
         if endpoint in ConnectionBased:
-            ret_socket = socket.socket(s_fam,socket.SOCK_STREAM)
-            ret_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
+            ret_socket = socket.socket(s_fam, socket.SOCK_STREAM)
+            ret_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
             # we don't ssl wrap here since we need to know whether or not
             # the socket is server side or client side ~ <(^.^<)
             if endpoint == "L3_raw":
-                ret_socket.setsockopt(socket.IPPROTO_IP,socket.IP_HDRINCL,1)
+                ret_socket.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
             return ret_socket
 
-        elif "udp" in endpoint or "dtls" in endpoint: 
-            ret_socket =  socket.socket(s_fam,socket.SOCK_DGRAM)
-            ret_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
-            
+        elif "udp" in endpoint or "dtls" in endpoint:
+            ret_socket = socket.socket(s_fam, socket.SOCK_DGRAM)
+            ret_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
             if self.L3_raw:
-                ret_socket.setsockopt(socket.IPPROTO_IP,socket.IP_HDRINCL,1)
+                ret_socket.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
 
             return ret_socket
 
@@ -364,70 +402,80 @@ class DeceptProxy():
             s_type = socket.SOCK_RAW
             if endpoint in PROTO:
                 # e.g. if proto == ospf, s_proto => 89
-                s_proto = PROTO[endpoint] 
+                s_proto = PROTO[endpoint]
             elif endpoint == "raw":
                 s_proto = socket.IPPROTO_RAW
             elif endpoint == "stdin" or endpoint == "stdout":
                 return
             else:
-                s_proto = int(endpoint) 
+                s_proto = int(endpoint)
 
-            ret_socket = socket.socket(s_fam,s_type,s_proto)    
+            ret_socket = socket.socket(s_fam, s_type, s_proto)
             # Crafting L2/L3 is hard, yo.
             if self.L3_raw:
-                ret_socket.setsockopt(socket.IPPROTO_IP,socket.IP_HDRINCL,1)
+                ret_socket.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
 
-            return ret_socket 
-       
+            return ret_socket
 
     def server_socket_init(self):
-        if "stdin" in  self.local_end_type:
+        if "stdin" in self.local_end_type:
             return
 
         try:
             if "windows" in system().lower() or "cygwin" in system().lower():
-                self.server_socket.bind((self.lhost,self.lport))
-            
+                self.server_socket.bind((self.lhost, self.lport))
+
             elif self.server_socket.family == socket.AF_PACKET:
                 # case normal L2 socket
                 if self.server_socket.proto == 0:
                     return
-                    
+
                 # case promiscuous socket
-                if self.server_socket.proto == 0x300:  
+                if self.server_socket.proto == 0x300:
                     return
 
             elif self.server_socket.family == socket.AF_UNIX:
-                self.server_socket.bind((self.lhost)) 
+                self.server_socket.bind((self.lhost))
             elif "darwin" not in system().lower() and self.server_socket.family == socket.AF_PACKET:
-                self.server_socket.bind((self.lhost,0))
+                self.server_socket.bind((self.lhost, 0))
             else:
-                self.server_socket.bind((self.lhost,self.lport))
-            output("[*.*] Listening on %s:%s" % (self.lhost,str(self.lport)),CYAN)
+                self.server_socket.bind((self.lhost, self.lport))
+            output(
+                "[*.*] Listening on %s:%s" % (self.lhost, str(self.lport)),
+                CYAN
+            )
 
         except Exception as e:
-            output(str(e),YELLOW)
-            output("[x.x] Unable to bind to %s:%s" % (self.lhost,str(self.lport)) ,RED)
+            output(str(e), YELLOW)
+            output(
+                "[x.x] Unable to bind to %s:%s" % (self.lhost,
+                                                   str(self.lport)),
+                RED
+            )
             sys.exit(0)
 
-        output("[$.$] local:%s|remote:%s" % (self.local_end_type,self.remote_end_type), GREEN)
+        output(
+            "[$.$] local:%s|remote:%s" % (self.local_end_type,
+                                          self.remote_end_type),
+            GREEN
+        )
 
         if self.local_end_type in ConnectionBased:
             try:
                 self.server_socket.listen(self.max_conns)
             except Exception as e:
                 output(e)
-    
-    
+
     def server_loop(self):
         # make sure our ssl context is set appropriately
         if self.remote_verify and self.remote_end_type == "ssl":
             self.remote_context.verify_mode = ssl.CERT_REQUIRED
             # should prob add an option for cer file...
-            #self.remote_context.load_verify_locations("cert_chain.crt")
+            # self.remote_context.load_verify_locations("cert_chain.crt")
             self.remote_context.check_hostname = True
-            #ciphers = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305"
-            #self.remote_context.set_ciphers(ciphers)
+            # ciphers = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-"
+            #           "POLY1305"
+            # self.remote_context.set_ciphers(ciphers)
 
         # prep for dumping raw datagrams
         if self.dumpraw:
@@ -437,187 +485,198 @@ class DeceptProxy():
                 pass
 
             try:
-                sub_folder = str(datetime.now()).replace(" ","_") 
-                sub_folder = sub_folder.replace(":","_")
-                self.dumpraw = join(self.dumpraw,sub_folder) 
+                sub_folder = str(datetime.now()).replace(" ", "_")
+                sub_folder = sub_folder.replace(":", "_")
+                self.dumpraw = join(self.dumpraw, sub_folder)
                 mkdir(self.dumpraw)
             except Exception as e:
                 print e
                 pass
-        
-        # If we're attempting to write to a pcap, shouldn't it be required to be L2?
-        # # Perhaps make a raw promisc regardless? for when no tcpdump/tshark?
+
+        # If we're attempting to write to a pcap, shouldn't it be required to
+        # be L2? Perhaps make a raw promisc regardless? for when no
+        # tcpdump/tshark?
         if self.pcap:
-                
-            self.pcapdir = join(getcwd(),"pcap") 
+
+            self.pcapdir = join(getcwd(), "pcap")
             try:
                 mkdir(self.pcapdir)
-            except:
+            except Exception as e:
+                print "Exception occurred: %s" % e
                 pass
-            
-            if not isfile(join(self.pcapdir,self.pcap)):                  
+
+            if not isfile(join(self.pcapdir, self.pcap)):
                 # if it doesn't exist, write the headers/etc
 
                 import tempfile
                 try:
-                    self.pcapfd = open(join(self.pcapdir,self.pcap),"wb",0) 
+                    self.pcapfd = open(join(self.pcapdir, self.pcap), "wb", 0)
                     self.pcapfd.write((pcap_global_hdr().get_byte_array()))
                 except Exception as e:
                     # why isn't this behaving as  the docs describe?
-                    # not returnning an open fd, just a tuple of (fd, name)
+                    # not returning an open fd, just a tuple of (fd, name)
                     # perhaps I am just dumb
-                    output(e,YELLOW)
-                    self.pcap = tempfile.mkstemp(suffix=".pcap",dir=self.pcapdir) 
-                    output("[i.i] Couldnt tmp pcap file %s instead!"%(self.pcap[1]),CYAN) 
-                    self.pcapfd = open(self.pcap[1],"wb",0)
+                    output(e, YELLOW)
+                    self.pcap = tempfile.mkstemp(suffix=".pcap",
+                                                 dir=self.pcapdir)
+                    output(
+                        "[i.i] Couldnt tmp pcap file %s instead!" % (self.pcap[1]),
+                        CYAN
+                    )
+                    self.pcapfd = open(self.pcap[1], "wb", 0)
                     self.pcapfd.write((pcap_global_hdr().get_byte_array()))
             else:
                 # if it does exist, just append packets
-                 
-                self.pcapfd = open(join(self.pcapdir,self.pcap),"ab",0) 
 
+                self.pcapfd = open(join(self.pcapdir, self.pcap), "ab", 0)
 
-            #### Set up a promiscuous monitor socket such that we can actually get more than raw data.
-            #### ETH_P_IP = 0x0800
-            #### ETH_P_ALL = 0x0300
-            
-            self.pcap_sock = socket.socket(socket.AF_PACKET,socket.SOCK_RAW,0x0300)
-            
-            ### Set up our EBPF prog #### def create_ebpf_filter(ip,port,proto=""):
-            self.ebpf,self.b = create_ebpf_filter(self.lhost,self.lport) 
-            #print "[^_^] ebpf: %s\n%s" % (repr(self.ebpf), self.b)
+            # Set up a promiscuous monitor socket such that we can actually get
+            # more than raw data.
+            # ETH_P_IP = 0x0800
+            # ETH_P_ALL = 0x0300
+
+            self.pcap_sock = socket.socket(socket.AF_PACKET,
+                                           socket.SOCK_RAW,
+                                           0x0300)
+
+            # Set up our EBPF prog # def create_ebpf_filter(ip,port,proto=""):
+            self.ebpf, self.b = create_ebpf_filter(self.lhost, self.lport)
+            # print "[^_^] ebpf: %s\n%s" % (repr(self.ebpf), self.b)
             # SO_ATTACH_FILTER == 26
-            self.pcap_sock.setsockopt(socket.SOL_SOCKET, 26, self.ebpf) 
-            self.pcap_sock.bind((self.pcap_interface,0))
+            self.pcap_sock.setsockopt(socket.SOL_SOCKET, 26, self.ebpf)
+            self.pcap_sock.bind((self.pcap_interface, 0))
 
-            self.mon_flag = multiprocessing.Event() 
+            self.mon_flag = multiprocessing.Event()
 
-            mon_thread = multiprocessing.Process(target = self.monitor_loop, 
-                                                           args = (self.pcap_sock,
-                                                                   self.pcapfd,
-                                                                   self.mon_flag
-                                                                   )) 
+            mon_thread = multiprocessing.Process(target=self.monitor_loop,
+                                                 args=(self.pcap_sock,
+                                                       self.pcapfd,
+                                                       self.mon_flag))
             mon_thread.start()
 
-
-
         if self.l2_filter:
-            self.l2_filter = ''.join(chr(int(x,16)) for x in filter(None,l2_filter.split("x")))
+            self.l2_filter = ''.join(chr(int(x, 16)) for x in filter(None, l2_filter.split("x")))
 
-        self.server_socket = self.socket_plinko(self.lhost,self.local_end_type) 
+        self.server_socket = self.socket_plinko(
+            self.lhost,
+            self.local_end_type
+        )
 
-        # Alrighty, here's where we start to distinguish 
+        # Alrighty, here's where we start to distinguish
         # socket Family/type/protocol
         self.server_socket_init()
 
         if self.tapmode:
-    
+
             '''
             # since we can't do AF_PACKET with windows, we only go down to L3.
-            dummy_frame  = "\x00"*0xC  #dst/src mac 
+            dummy_frame  = "\x00"*0xC  #dst/src mac
             dummy_frame += "\x80\x00" #proto IP
             '''
 
-            self.dummy_packet = "\x45" #ver,headerlen 
-            self.dummy_packet+= "\x00" # DSC
-            self.dummy_packet+= "L3TOTESHEADER" # Total len, will fixup
-            self.dummy_packet+= "??"   # ID field, doesnt' matter. 
-            self.dummy_packet+= "\x00\x00" # flags.
-            self.dummy_packet+= "\x80" #ttl.
+            self.dummy_packet = "\x45"  # ver, headerlen
+            self.dummy_packet += "\x00"  # DSC
+            self.dummy_packet += "L3TOTESHEADER"  # Total len, will fixup
+            self.dummy_packet += "??"  # ID field, doesnt' matter.
+            self.dummy_packet += "\x00\x00"  # flags.
+            self.dummy_packet += "\x80"  # ttl.
 
             if self.remote_end_type == "ssl" or self.remote_end_type == "tcp":
-                self.dummy_packet+= "\x06" #proto => tcp
-            elif self.remote_end_type == "udp": 
-                self.dummy_packet+= "\x17" #proto => udp
+                self.dummy_packet += "\x06"  # proto => tcp
+            elif self.remote_end_type == "udp":
+                self.dummy_packet += "\x17"  # proto => udp
             else:
-                # if you need something else, add it yourself. 
-                self.dummy_packet+= "\x01" # proto => ICMP
+                # if you need something else, add it yourself.
+                self.dummy_packet += "\x01"  # proto => ICMP
 
-            self.dummy_packet+= "\x00\x00" # header checksum, don't care. 
-                
+            self.dummy_packet += "\x00\x00"  # header checksum, don't care.
+
             l_ip = ''.join(chr(int(octet)) for octet in self.lhost.split("."))
             r_ip = ''.join(chr(int(octet)) for octet in self.rhost.split("."))
 
-            self.inbound_dummy = self.dummy_packet + l_ip + r_ip 
+            self.inbound_dummy = self.dummy_packet + l_ip + r_ip
             self.outbound_dummy = self.dummy_packet + r_ip + l_ip
 
-            self.inbound_dummy += struct.pack(">H",self.rport) 
-            self.inbound_dummy += struct.pack(">H",self.lport) 
-            self.outbound_dummy += struct.pack(">H",self.lport) 
-            self.outbound_dummy += struct.pack(">H",self.rport) 
+            self.inbound_dummy += struct.pack(">H", self.rport)
+            self.inbound_dummy += struct.pack(">H", self.lport)
+            self.outbound_dummy += struct.pack(">H", self.lport)
+            self.outbound_dummy += struct.pack(">H", self.rport)
 
             self.l4_dummy = ""
             if self.remote_end_type == "ssl" or self.remote_end_type == "tcp":
-                self.l4_dummy+="\x00\x00\x00\x00" # seq num
-                self.l4_dummy+="\x00\x00\x00\x00" # ack num
-                self.l4_dummy+="\x50" # tcp header len
-                self.l4_dummy+="\x18" # we only really care about [psh,ack]
-                self.l4_dummy+="\x01\x00" # window size => 256
-                self.l4_dummy+="\x00\x00" # checksum, w/e.
-                self.l4_dummy+="\x00\x00" # urgent pointer
+                self.l4_dummy += "\x00\x00\x00\x00"  # seq num
+                self.l4_dummy += "\x00\x00\x00\x00"  # ack num
+                self.l4_dummy += "\x50"  # tcp header len
+                self.l4_dummy += "\x18"  # we only really care about [psh,ack]
+                self.l4_dummy += "\x01\x00"  # window size => 256
+                self.l4_dummy += "\x00\x00"  # checksum, w/e.
+                self.l4_dummy += "\x00\x00"  # urgent pointer
 
-            elif self.remote_end_type == "udp": 
-                l4_dummy+="L4TOTESHEADER"
-                l4_dummy+="\x00\x00"# checksum
+            elif self.remote_end_type == "udp":
+                l4_dummy += "L4TOTESHEADER"
+                l4_dummy += "\x00\x00"  # checksum
 
             else:
                 pass
 
-            self.inbound_dummy+=self.l4_dummy
-            self.outbound_dummy+=self.l4_dummy
-            
+            self.inbound_dummy += self.l4_dummy
+            self.outbound_dummy += self.l4_dummy
 
             '''
             try:
             '''
             # No AF_PACKET support in windows.
-            #self.tapsock = socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.IPPROTO_RAW)
-            self.tapsock = socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.IPPROTO_RAW)
-            self.tapsock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1) 
-              
-    
-            
+            # self.tapsock = socket.socket(
+            #     socket.AF_INET,
+            #     socket.SOCK_RAW,
+            #     socket.IPPROTO_RAW
+            # )
+            self.tapsock = socket.socket(
+                socket.AF_INET,
+                socket.SOCK_RAW,
+                socket.IPPROTO_RAW
+            )
+            self.tapsock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
 
             '''
             except Exception:
                 # Perms yo.
-                output("[x.x] Could create a raw interface. Are you running as root?",RED)
+                output(
+                    "[x.x] Could create a raw interface. Are you running as"
+                    " root?",
+                    RED
+                )
             '''
 
-            
-                
-                
-
-
-        if self.fuzz_file: 
+        if self.fuzz_file:
             self.fuzzerData = mutiny.FuzzerData()
 
         if self.poison_file:
-            poison_thread = multiprocessing.Process(target = self.arp_poisoner,
-                                                    args = (self.poison_file,
-                                                            self.poison_int,
-                                                            self.killswitch))
+            poison_thread = multiprocessing.Process(
+                target=self.arp_poisoner,
+                args=(self.poison_file,
+                      self.poison_int,
+                      self.killswitch))
             poison_thread.start()
-
 
         # attempt to parse config file, if any. Should be located in 'rhost'
         # will continue if not found.
         try:
             confbuf = ""
             conflist = []
-            with open(self.rhost,"r") as f:
-                confbuf = f.read() 
-            for line in filter(None,confbuf.split("\n")): 
+            with open(self.rhost, "r") as f:
+                confbuf = f.read()
+            for line in filter(None, confbuf.split("\n")):
                 if line[0] != "#":
                     conflist.append(line)
 
             if len(conflist) > 0:
                 for entry in conflist:
                     try:
-                        name,ip = entry.split("|") 
+                        name, ip = entry.split("|")
                         if len(name) and len(ip):
                             self.hostconf_dict[name] = ip
-                            output("[!.!] Added %s | %s" % (name,ip),CYAN)
+                            output("[!.!] Added %s | %s" % (name, ip), CYAN)
                     except Exception as e:
                         print e
                         pass
@@ -628,81 +687,111 @@ class DeceptProxy():
             print e
             pass
 
-
-        #! Todo, no loop for UDP...
+        # TODO: no loop for UDP...
         while True:
             if self.local_end_type in ConnectionBased:
-                csock,addr = self.server_socket.accept()
-                
+                csock, addr = self.server_socket.accept()
 
-                #print out conn info
+                # print out conn info
                 if addr:
                     ts = datetime.now().strftime("%H:%M:%S.%f")
-                    output("[>.>] %s Received Connection from %s" % (ts,str(addr)),GREEN,self.output_lock) 
+                    output(
+                        "[>.>] %s Received Connection from %s" % (ts,
+                                                                  str(addr)),
+                        GREEN,
+                        self.output_lock
+                    )
                 else:
-                    output("[>.>] %s Received Connection from UnixSocket"%(ts),GREEN,self.output_lock) 
-
+                    output(
+                        "[>.>] %s Received Connection from UnixSocket" % (ts),
+                        GREEN,
+                        self.output_lock
+                    )
 
                 if "windows" in system().lower() or "cygwin" in system().lower():
-                    import threading 
-                    proxy_thread = threading.Thread(target = self.proxy_loop, 
-                                                       args = (csock,
-                                                               self.rhost,
-                                                               self.rport,
-                                                               addr,
-                                                               self.output_lock)) 
+                    import threading
+                    proxy_thread = threading.Thread(
+                        target=self.proxy_loop,
+                        args=(csock,
+                              self.rhost,
+                              self.rport,
+                              addr,
+                              self.output_lock))
                 else:
-                    proxy_thread = multiprocessing.Process(target = self.proxy_loop, 
-                                                           args = (csock,
-                                                                   self.rhost,
-                                                                   self.rport,
-                                                                   addr,
-                                                                   self.output_lock)) 
+                    proxy_thread = multiprocessing.Process(
+                        target=self.proxy_loop,
+                        args=(csock,
+                              self.rhost,
+                              self.rport,
+                              addr,
+                              self.output_lock))
 
                 proxy_thread.start()
                 csock = None
                 addr = None
 
             elif self.local_end_type == "udp" or self.local_end_type == "dtls":
-                self.proxy_loop(self.server_socket,self.rhost,self.rport,"",self.output_lock)
+                self.proxy_loop(
+                    self.server_socket,
+                    self.rhost,
+                    self.rport,
+                    "",
+                    self.output_lock
+                )
                 self.exit_triggers()
                 return
 
             elif self.server_socket == sys.stdin:
-                self.proxy_loop(sys.stdin,self.rhost,self.rport,("stdin",0),"",self.output_lock)
+                self.proxy_loop(
+                    sys.stdin,
+                    self.rhost,
+                    self.rport,
+                    ("stdin", 0),
+                    "",
+                    self.output_lock
+                )
 
-            elif self.server_socket.family == socket.AF_PACKET: 
-                output("[>.>] L2 ready: %s:%s <=> %s:%s" % (str(self.lhost),str(self.lport),str(self.rhost),str(self.rport)),YELLOW) 
+            elif self.server_socket.family == socket.AF_PACKET:
+                output(
+                    "[>.>] L2 ready: %s:%s <=> %s:%s" % (str(self.lhost),
+                                                         str(self.lport),
+                                                         str(self.rhost),
+                                                         str(self.rport)),
+                    YELLOW
+                )
 
-                self.raw_proxy_loop(self.rhost,self.rport)
+                self.raw_proxy_loop(self.rhost, self.rport)
 
-
-        
         if self.pcapfd:
             try:
                 self.mon_flag.set()
-            except:
+            except Exception as e:
+                print "Exception occurred: %s" % e
                 pass
 
+    def proxy_loop(self, local_socket, rhost, rport, cli_addr="", plock=""):
 
-    def proxy_loop(self,local_socket,rhost,rport,cli_addr="",plock=""):
-   
-        self.thread_id = multiprocessing.current_process().name.replace("Process","session")
+        self.thread_id = multiprocessing.current_process().name.replace(
+            "Process", "session")
 
-        # use for passing data between inbound and outbound handlers. 
+        # use for passing data between inbound and outbound handlers.
         self.userdata = []
 
         # used with hostconf_dict
         initial_buff = ""
 
-        # Attempt to parse as hostname. 
+        # Attempt to parse as hostname.
         if len(self.hostconf_dict) <= 0:
             try:
                 rhost = socket.gethostbyname(rhost)
             except Exception as e:
                 if "Temporary failure in name resolution" in e or "Name or service" in e:
-                    output(str(e),YELLOW)
-                    output("[x.x] Unable to resolve DNS name: %s" % (rhost), RED, plock)
+                    output(str(e), YELLOW)
+                    output(
+                        "[x.x] Unable to resolve DNS name: %s" % (rhost),
+                        RED,
+                        plock
+                    )
                     local_socket.close()
                     sys.exit()
 
@@ -710,289 +799,386 @@ class DeceptProxy():
             # See if we have a hostconf entry for rhost
             schro_local = local_socket
             hostname = ""
-            
+
             if self.local_end_type == "ssl":
                 try:
-                    schro_local = self.server_context.wrap_socket(local_socket, server_side=True)  
-                    output("[^.^] Local ssl wrap successful",GREEN,plock)
+                    schro_local = self.server_context.wrap_socket(
+                        local_socket, server_side=True
+                    )
+                    output("[^.^] Local ssl wrap successful", GREEN, plock)
                 except ssl.SSLError as e:
-                    output("[x.x] Unable to wrap local SSL socket.",YELLOW, plock)
-                    output(str(e),RED, plock)
+                    output(
+                        "[x.x] Unable to wrap local SSL socket.",
+                        YELLOW,
+                        plock
+                    )
+                    output(str(e), RED, plock)
                     schro_local.close()
                     sys.exit()
 
             try:
                 initial_buff = self.get_bytes(schro_local)
-                #output(initial_buff,YELLOW, plock)
+                # output(initial_buff,YELLOW, plock)
                 for line in initial_buff.split("\n"):
-                    if "Host:" in line: 
+                    if "Host:" in line:
                         hostname = line.split(" ")[1].rstrip()
             except Exception as e:
                 if len(initial_buff) > 0:
-                    output("[x.x] No 'Host:' header from local socket with hostconf!",RED, plock)
-                    output(initial_buff, plock) 
+                    output(
+                        "[x.x] No 'Host:' header from local socket with "
+                        "hostconf!",
+                        RED,
+                        plock
+                    )
+                    output(initial_buff, plock)
                 else:
-                    output("[x.x] Empty Message",RED, plock)
-                output(str(e),RED, plock)
-                output(initial_buff,YELLOW, plock)
+                    output("[x.x] Empty Message", RED, plock)
+                output(str(e), RED, plock)
+                output(initial_buff, YELLOW, plock)
                 schro_local.close()
                 sys.exit()
-    
+
             if len(hostname) == 0:
-                output("[x.x] Empty Message",RED, plock)
-                output(initial_buff, plock) 
+                output("[x.x] Empty Message", RED, plock)
+                output(initial_buff, plock)
                 schro_local.close()
                 sys.exit()
 
             try:
-                rhost = self.hostconf_dict[hostname] 
-            except:
-                output("[x.x] No entry for %s in hostconf!"%hostname,RED, plock)
-                output(initial_buff, plock) 
+                rhost = self.hostconf_dict[hostname]
+            except Exception as e:
+                print "Exception occurred: %s" % e
+                output(
+                    "[x.x] No entry for %s in hostconf!" % hostname,
+                    RED,
+                    plock
+                )
+                output(initial_buff, plock)
 
             self.rhost = hostname
-            output("[-.0] Connecting to %s (%s:%d)"%(rhost,hostname,rport),ORANGE,plock) 
+            output(
+                "[-.0] Connecting to %s (%s:%d)" % (rhost, hostname, rport),
+                ORANGE,
+                plock
+            )
 
+        remote_socket = self.socket_plinko(rhost, self.remote_end_type)
 
-        remote_socket = self.socket_plinko(rhost,self.remote_end_type)
-        
         if (self.rbind_addr != "0.0.0.0") or (self.rbind_port > 0):
-            output("[!.!] Binding Rsock to %s:%d"%(self.rbind_addr,self.rbind_port),CYAN, plock)
-            remote_socket.bind((self.rbind_addr,self.rbind_port))
+            output(
+                "[!.!] Binding Rsock to %s:%d" % (self.rbind_addr,
+                                                  self.rbind_port),
+                CYAN,
+                plock
+            )
+
+            remote_socket.bind((self.rbind_addr, self.rbind_port))
 
         # schro == schroedinger
         # simultaneuously ssl wrapped and not until afterwards
         schro_remote = remote_socket
-        
-        if not len(initial_buff): 
+
+        if not len(initial_buff):
             schro_local = local_socket
-                    
+
         try:
             if self.remote_end_type in ConnectionBased:
                 if (self.local_end_type == "udp" or self.local_end_type == "dtls") and not self.receive_first:
                     # we need to wait for data before we connect.
                     pass
                 elif "windows" in system().lower() or "cygwin" in system().lower():
-                    remote_socket.connect((rhost,rport))
+                    remote_socket.connect((rhost, rport))
                 elif remote_socket.family == socket.AF_UNIX:
-                    remote_socket.connect((rhost)) 
+                    remote_socket.connect((rhost))
                 elif remote_socket.family == socket.AF_INET6:
-                    remote_socket.connect((rhost,rport,0,0))
+                    remote_socket.connect((rhost, rport, 0, 0))
                 # to avoid dumb lack of socket.AF_PACKET in osx
                 elif "darwin" not in system().lower() and remote_socket.family != socket.AF_PACKET:
-                    remote_socket.connect((rhost,rport))
+                    remote_socket.connect((rhost, rport))
                 else:
-                    remote_socket.connect((rhost,rport))
+                    remote_socket.connect((rhost, rport))
 
         except Exception as e:
-            output(str(e),YELLOW, plock)
-            output("[x.x] Unable to connect to %s,%s" % (rhost,str(rport)), RED, plock)
+            output(str(e), YELLOW, plock)
+            output(
+                "[x.x] Unable to connect to %s,%s" % (rhost, str(rport)),
+                RED,
+                plock
+            )
             sys.exit()
 
         if self.local_end_type == "ssl" and len(initial_buff) == 0:
             try:
-                schro_local = self.server_context.wrap_socket(local_socket, server_side=True)  
+                schro_local = self.server_context.wrap_socket(
+                    local_socket, server_side=True
+                )
             except ssl.SSLError as e:
-                output("[x.x] Unable to wrap local SSL socket.",YELLOW, plock)
-                output(str(e),RED, plock)
+                output("[x.x] Unable to wrap local SSL socket.", YELLOW, plock)
+                output(str(e), RED, plock)
                 schro_local.close()
                 sys.exit()
         elif self.local_end_type == "dtls" and len(initial_buff) == 0:
-             try:
-                schro_local = SSL.Connection(self.server_context,local_socket) 
-             except Exception as e:
-                output("[x.x] Unable to wrap local DTLS socket.",YELLOW, plock)
-                output(str(e),RED, plock)
+            try:
+                schro_local = SSL.Connection(self.server_context, local_socket)
+            except Exception as e:
+                output(
+                    "[x.x] Unable to wrap local DTLS socket.",
+                    YELLOW,
+                    plock
+                )
+                output(str(e), RED, plock)
                 schro_local.close()
                 sys.exit()
 
-        
         # need to wait for udp...
         if self.remote_end_type == "ssl" and self.local_end_type != "udp":
-            try: 
+            try:
                 try:
-                    self.remote_context.load_cert_chain(certfile=self.remote_certfile,keyfile=self.remote_keyfile)
-                    #output("[!-!] Using %s and %s!"%(self.remote_certfile,self.remote_keyfile),CYAN, plock)
-                except: 
+                    self.remote_context.load_cert_chain(
+                        certfile=self.remote_certfile,
+                        keyfile=self.remote_keyfile
+                    )
+                    # output(
+                    #     "[!-!] Using %s and %s!" % (self.remote_certfile,
+                    #                                 self.remote_keyfile),
+                    #     CYAN,
+                    #     plock
+                    # )
+                except Exception as e:
+                    print "Exception occurred: %s" % e
                     try:
-                        self.remote_context.load_cert_chain(certfile=self.remote_certfile)
-                        #output("[!-!] Using %s"%(self.remote_certfile,self.remote_keyfile),CYAN, plock)
-                    except:
-                        output("[x.x] Unable to do SSL remote, where yo' keys at?",YELLOW, plock)
-                        output("[!-!] Using cert %s and key %s!"%(self.remote_certfile,self.remote_keyfile),CYAN, plock)
+                        self.remote_context.load_cert_chain(
+                            certfile=self.remote_certfile
+                        )
+                        # output(
+                        #     "[!-!] Using %s" % (self.remote_certfile,
+                        #                         self.remote_keyfile),
+                        #     CYAN,
+                        #     plock
+                        # )
+                    except Exception as e:
+                        print "Exception occurred: %s" % e
+                        output(
+                            "[x.x] Unable to do SSL remote, where yo' keys "
+                            "at?",
+                            YELLOW,
+                            plock
+                        )
+                        output(
+                            "[!-!] Using cert %s and key %s!" % (
+                                self.remote_certfile, self.remote_keyfile
+                            ),
+                            CYAN,
+                            plock
+                        )
                         sys.exit()
 
-                        
-
                 if self.remote_verify:
-                    try: 
-                        schro_remote = self.remote_context.wrap_socket(remote_socket,server_hostname=self.remote_verify) 
+                    try:
+                        schro_remote = self.remote_context.wrap_socket(
+                            remote_socket, server_hostname=self.remote_verify
+                        )
                         output("[^_^] Wrapped remote!")
                     except Exception as e:
-                        output("[x.x] Unable to verify remote host as '%s' "%self.remote_verify,YELLOW, plock)
-                        output(str(e),RED, plock)
+                        output("[x.x] Unable to verify remote host as '%s' " % self.remote_verify, YELLOW, plock)
+                        output(str(e), RED, plock)
                         schro_remote.close()
                         sys.exit()
 
                 else:
-                    schro_remote = self.remote_context.wrap_socket(remote_socket) 
-                
+                    schro_remote = self.remote_context.wrap_socket(remote_socket)
 
             except ssl.SSLError as e:
-                output("[x.x] Unable to do SSL remote. Did you send a non-SSL request?",YELLOW, plock)
-                output(str(e),RED, plock)
+                output("[x.x] Unable to do SSL remote. Did you send a non-SSL request?", YELLOW, plock)
+                output(str(e), RED, plock)
                 schro_remote.close()
                 sys.exit()
             except Exception as e:
-                output("[x.x] Assorted error, yo",YELLOW, plock)
-                output(str(e),RED, plock)
+                output("[x.x] Assorted error, yo", YELLOW, plock)
+                output(str(e), RED, plock)
                 remote_socket.close()
                 sys.exit()
 
-        #!Todo: add DTLS verification
+        # TODO: add DTLS verification
         if self.remote_end_type == "dtls" and self.local_end_type != "udp":
             try:
-                schro_remote = SSL.Connection(self.remote_context,remote_socket)      
+                schro_remote = SSL.Connection(self.remote_context,remote_socket)
                 schro_remote.set_connect_state()
-                schro_remote.connect((rhost,rport))
+                schro_remote.connect((rhost, rport))
                 schro_remote.do_handshake()
             except Exception as e:
-                output("[x.x] DTLS error, yo",YELLOW, plock)
-                output(str(e),RED, plock)
+                output("[x.x] DTLS error, yo", YELLOW, plock)
+                output(str(e), RED, plock)
                 remote_socket.close()
                 sys.exit()
-                
-        # we can't really know where to send the packet yet if UDP. 
-        # maybe save it till we recv? 
+
+        # we can't really know where to send the packet yet if UDP.
+        # maybe save it till we recv?
         if self.receive_first and self.local_end_type in ConnectionBased:
             remote_buffer = get_bytes(schro_remote)
-            remote_buffer = self.inbound_handler(remote_buffer,rhost,self.lhost)
-            
+            remote_buffer = self.inbound_handler(remote_buffer,
+                                                 rhost,
+                                                 self.lhost)
+
             if self.verbose:
-                hexdump(remote_buffer,CYAN)  
-            self.pkt_count+=1
-        
-            #if data to send to local, do so
+                hexdump(remote_buffer, CYAN)
+            self.pkt_count += 1
+
+            # if data to send to local, do so
             if len(remote_buffer):
                 ts = datetime.now().strftime("%H:%M:%S.%f")
-                output("[<.<] %s Sending %d bytes inbound (%s:%d)." % (ts,len(remote_buffer),self.lhost,self.lport),ORANGE, plock)
-                if self.local_end_type in ConnectionBased: 
-                    self.buffered_send(schro_local,remote_buffer)
-                else:   
-                    self.buffered_sendto(schro_local,remote_buffer,(self.lhost,self.lport))
-        
+                output("[<.<] %s Sending %d bytes inbound (%s:%d)." % (ts, len(remote_buffer), self.lhost, self.lport), ORANGE, plock)
+                if self.local_end_type in ConnectionBased:
+                    self.buffered_send(schro_local, remote_buffer)
+                else:
+                    self.buffered_sendto(schro_local, remote_buffer, (self.lhost, self.lport))
+
         elif not self.receive_first and (self.local_end_type == "udp" or self.local_end_type == "dtls"):
             # [>_>] port range is going to override schro_local, cuz I'm lazy
             if self.udp_port_range:
-                    
+
                 schro_local = [schro_local]
-                schro_local_range = validateNumberRange(self.udp_port_range,True) # flatten out number range into list of integers
-                output("[!-!] Attempting to bind %d UDP ports : %s" %(len(schro_local_range),self.udp_port_range),GREEN, plock)
+                # flatten out number range into list of integers
+                schro_local_range = validateNumberRange(
+                    self.udp_port_range, True
+                )
+                output("[!-!] Attempting to bind %d UDP ports : %s" % (len(schro_local_range), self.udp_port_range), GREEN, plock)
                 for port in schro_local_range:
-                    tmp = self.socket_plinko(self.lhost,self.local_end_type) 
-                    # shoulda implimented server_init better to take a socket, eh.
+                    tmp = self.socket_plinko(self.lhost, self.local_end_type)
+                    # shoulda implimented server_init better to take a socket,
+                    # eh.
                     try:
-                        tmp.bind((self.lhost,port))
-                        tmp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
-                        schro_local.append(tmp) 
-                    except:
-                        output("[x.x] Unable to bind UDP %s:%d."%(self.lhost,port),YELLOW, plock)
-            
+                        tmp.bind((self.lhost, port))
+                        tmp.setsockopt(
+                            socket.SOL_SOCKET,
+                            socket.SO_REUSEADDR,
+                            1
+                        )
+                        schro_local.append(tmp)
+                    except Exception as e:
+                        print "Exception occurred: %s" % e
+                        output(
+                            "[x.x] Unable to bind UDP %s:%d." % (self.lhost,
+                                                                 port),
+                            YELLOW,
+                            plock
+                        )
+
                 while True:
-                    readable,__,__ = select.select(schro_local,[],schro_local,self.timeout)
+                    readable, __, __ = select.select(
+                        schro_local,
+                        [],
+                        schro_local,
+                        self.timeout
+                    )
                     if len(readable) > 0:
                         break
 
-            else: #udp && !udp_port_range
+            else:  # udp && !udp_port_range
                 while True:
-                    readable,__,__ = select.select([schro_local],[],[schro_local],self.timeout)
+                    readable, __, __ = select.select(
+                        [schro_local],
+                        [],
+                        [schro_local],
+                        self.timeout
+                    )
                     if len(readable) > 0:
                         break
-        
+
             if self.remote_end_type != "udp":
-                remote_socket.connect((rhost,rport))
+                remote_socket.connect((rhost, rport))
 
             if self.remote_end_type == "ssl":
-                try: 
-                    
-                    if self.remote_certfile: 
-                        self.remote_context.load_cert_chain(certfile=self.remote_certfile,keyfile=self.remote_keyfile)
+                try:
+
+                    if self.remote_certfile:
+                        self.remote_context.load_cert_chain(
+                            certfile=self.remote_certfile,
+                            keyfile=self.remote_keyfile
+                        )
 
                     if self.remote_verify:
-                        schro_remote = self.remote_context.wrap_socket(remote_socket,server_hostname=self.remote_verify) 
+                        schro_remote = self.remote_context.wrap_socket(
+                            remote_socket,
+                            server_hostname=self.remote_verify
+                        )
                     else:
-                        schro_remote = self.remote_context.wrap_socket(remote_socket) 
+                        schro_remote = self.remote_context.wrap_socket(
+                            remote_socket
+                        )
 
-                    
-                    #remote_cert = schro_remote.getpeercert()
-                    #print remote_cert
+                    # remote_cert = schro_remote.getpeercert()
+                    # print remote_cert
 
                 except ssl.SSLError as e:
-                    output("[x.x] Unable to do SSL remote. Did you send a non-SSL request?",YELLOW, plock)
-                    output(str(e),RED, plock)
+                    output("[x.x] Unable to do SSL remote. Did you send a non-SSL request?", YELLOW, plock)
+                    output(str(e), RED, plock)
                     schro_remote.close()
                     sys.exit()
 
-            
             if self.remote_end_type == "dtls":
                 try:
-                    schro_remote = SSL.Connection(self.remote_context,remote_socket)
+                    schro_remote = SSL.Connection(self.remote_context,
+                                                  remote_socket)
                     schro_remote.set_connect_state()
-                    schro_remote.connect((rhost,rport))
+                    schro_remote.connect((rhost, rport))
                     schro_remote.do_handshake()
                 except Exception as e:
-                    output("[x.x] DTLS error, yo",YELLOW, plock)
-                    output(str(e),RED)
+                    output("[x.x] DTLS error, yo", YELLOW, plock)
+                    output(str(e), RED)
                     remote_socket.close()
                     sys.exit()
-                 
 
         buf = ""
         # don't know if port range or not
         active_udp = None
         schro_list = []
-        resp_count = 0 
+        resp_count = 0
         # for DTLS
         remote_sock = None
         remote_host = None
         remote_port = -1
         handshake_flag = False
-        
-       
+
         try:
-            schro_list = schro_local[:] 
+            schro_list = schro_local[:]
             schro_list.append(schro_remote)
-            active_udp = schro_local[0] 
-        except:
+            active_udp = schro_local[0]
+        except Exception as e:
+            print "Exception occurred: %s" % e
             schro_list = [schro_local, schro_remote]
 
         if len(initial_buff):
             byte_count = len(initial_buff)
-            buf = self.outbound_handler(initial_buff,self.lhost,self.rhost) 
+            buf = self.outbound_handler(initial_buff, self.lhost, self.rhost)
             if byte_count > 0 and self.verbose:
                 if byte_count < 0x2000:
-                    hexdump(buf,CYAN)
+                    hexdump(buf, CYAN)
                 else:
-                    output("[!_!] Truncated Message len %d!"%byte_count, plock)
+                    output("[!_!] Truncated Message len %d!" % byte_count,
+                           plock)
 
             if len(buf):
-                self.pkt_count+=1
+                self.pkt_count += 1
                 ts = datetime.now().strftime("%H:%M:%S.%f")
 
                 if self.remote_end_type in ConnectionBased:
-                    self.buffered_send(schro_remote,buf)
-                    output("[o.o] %s Sent %d bytes to remote (%s:%d->%s:%d)\n" % (ts, len(buf),cli_addr[0],cli_addr[1],self.rhost,self.rport),CYAN, plock)
-                elif self.remote_end_type == "stdout" or self.local_end_type == "stdin": 
-                    sys.stdout.write(buf)      
-                    output("[o.o] %s Sent %d bytes to remote\n" % (ts, len(buf)),YELLOW)
+                    self.buffered_send(schro_remote, buf)
+                    output("[o.o] %s Sent %d bytes to remote (%s:%d->%s:%d)\n" % (ts, len(buf), cli_addr[0], cli_addr[1], self.rhost, self.rport), CYAN, plock)
+                elif self.remote_end_type == "stdout" or self.local_end_type == "stdin":
+                    sys.stdout.write(buf)
+                    output(
+                        "[o.o] %s Sent %d bytes to remote\n" % (ts, len(buf)),
+                        YELLOW
+                    )
                 else:
-                    self.buffered_sendto(schro_remote,buf,(self.rhost,self.rport))
-                    output("[o.o] %s Sent %d bytes to remote (%s:%d)\n" % (ts, len(buf),self.rhost,self.rport),CYAN)
-
+                    self.buffered_sendto(schro_remote, buf,
+                                         (self.rhost, self.rport))
+                    output("[o.o] %s Sent %d bytes to remote (%s:%d)\n" % (ts, len(buf), self.rhost, self.rport), CYAN)
 
         try:
-            while True: 
-                if not len(initial_buff): 
+            while True:
+                if not len(initial_buff):
                     byte_count = 0
                 else:
                     initial_buff = ""
@@ -1000,16 +1186,22 @@ class DeceptProxy():
                 if self.killswitch.is_set():
                     if self.local_end_type == "ssl":
                         try:
-                            schro_local.shutdown(socket.SHUT_RDWR) 
-                        except:
+                            schro_local.shutdown(socket.SHUT_RDWR)
+                        except Exception as e:
+                            print "Exception occurred: %s" % e
                             pass
                     schro_local.close()
                     if schro_remote != sys.stdout:
-                        schro_remote.close() 
-                    break 
+                        schro_remote.close()
+                    break
 
-                readable, __,exceptional = select.select(schro_list,[],schro_list,self.timeout)    
-                
+                readable, __, exceptional = select.select(
+                    schro_list,
+                    [],
+                    schro_list,
+                    self.timeout
+                )
+
                 # if there's any sockets ready to read, get data
                 for s in readable:
                     if self.local_end_type == "dtls" and s == schro_local:
@@ -1018,291 +1210,345 @@ class DeceptProxy():
                             s.do_handshake()
                             handshake_flag = True
                         else:
-                            buf,remote_host,remote_port = self.get_bytes(s) 
+                            buf, remote_host, remote_port = self.get_bytes(s)
                     else:
                         try:
                             buf = self.get_bytes(s)
-                        except Exception as e: 
+                        except Exception as e:
                             raise
 
                     byte_count += len(buf)
 
-
-                    # readable socket w/no data => closed connection  
-                    # if there's data, perform appropriate handlers, and then send 
-                    # Need to see which direction first though
+                    # readable socket w/no data => closed connection
+                    # if there's data, perform appropriate handlers, and then
+                    # send. Need to see which direction first though
                     if s == schro_local:
                         # Case LOCAL] => [REMOTE
                         plock.acquire()
-                        buf = self.outbound_handler(buf,self.lhost,self.rhost) 
+                        buf = self.outbound_handler(
+                            buf,
+                            self.lhost,
+                            self.rhost
+                        )
                         if byte_count and self.verbose:
                             if byte_count < 0x2000:
-                                hexdump(buf,CYAN)
+                                hexdump(buf, CYAN)
                             else:
-                                output("[!_!] Truncated Message len %d!"%byte_count,CYAN)
+                                output("[!_!] Truncated Message len %d!" % byte_count, CYAN)
 
                         if len(buf):
-                            self.pkt_count+=1
-    
+                            self.pkt_count += 1
+
                             ts = datetime.now().strftime("%H:%M:%S.%f")
                             if self.remote_end_type in ConnectionBased:
-                                self.buffered_send(schro_remote,buf)
-                                output("[o.o] %s Sent %d bytes to remote (%s:%d->%s:%d)\n" % (ts, len(buf),cli_addr[0],cli_addr[1],self.rhost,self.rport),CYAN)
-                            elif self.remote_end_type == "stdout" or self.local_end_type == "stdin": 
-                                sys.stdout.write(buf)      
-                                output("[o.o] %s Sent %d bytes to remote\n" % (ts, len(buf)),CYAN)
+                                self.buffered_send(schro_remote, buf)
+                                output("[o.o] %s Sent %d bytes to remote (%s:%d->%s:%d)\n" % (ts, len(buf), cli_addr[0], cli_addr[1], self.rhost, self.rport), CYAN)
+                            elif self.remote_end_type == "stdout" or self.local_end_type == "stdin":
+                                sys.stdout.write(buf)
+                                output("[o.o] %s Sent %d bytes to remote\n" % (ts, len(buf)), CYAN)
                             else:
-                                self.buffered_sendto(schro_remote,buf,(self.rhost,self.rport))
-                                output("[o.o] %s Sent %d bytes to remote (%s:%d)\n" % (ts, len(buf),self.rhost,self.rport),CYAN)
+                                self.buffered_sendto(schro_remote, buf, (self.rhost, self.rport))
+                                output("[o.o] %s Sent %d bytes to remote (%s:%d)\n" % (ts, len(buf), self.rhost, self.rport), CYAN)
                         plock.release()
 
                     if s == schro_remote:
-                        # Case LOCAL] <= [REMOTE 
+                        # Case LOCAL] <= [REMOTE
                         plock.acquire()
-                        buf = self.inbound_handler(buf,rhost,rport)
+                        buf = self.inbound_handler(buf, rhost, rport)
                         if byte_count and self.verbose:
                             if byte_count < 0x2000:
-                                hexdump(buf,YELLOW)
+                                hexdump(buf, YELLOW)
                             else:
-                                output("[!_!] Truncated Message len %d!"%byte_count,YELLOW)
+                                output("[!_!] Truncated Message len %d!" % byte_count, YELLOW)
 
-                        if len(buf): 
-                            self.pkt_count+=1
+                        if len(buf):
+                            self.pkt_count += 1
                             ts = datetime.now().strftime("%H:%M:%S.%f")
 
-                            if self.local_end_type in ConnectionBased: 
-                                self.buffered_send(schro_local,buf)
-                                output("[o.o] %s Sent %d bytes to local (%s:%d<-%s:%d)\n" % (ts, len(buf),cli_addr[0],cli_addr[1],self.rhost,self.rport),YELLOW)
-                            elif self.remote_end_type == "stdout" or self.local_end_type == "stdin": 
-                                sys.stdout.write(buf)      
+                            if self.local_end_type in ConnectionBased:
+                                self.buffered_send(schro_local, buf)
+                                output("[o.o] %s Sent %d bytes to local (%s:%d<-%s:%d)\n" % (ts, len(buf), cli_addr[0], cli_addr[1], self.rhost, self.rport), YELLOW)
+                            elif self.remote_end_type == "stdout" or self.local_end_type == "stdin":
+                                sys.stdout.write(buf)
                                 output("[o.o] %s Sent %d bytes to local\n" % (ts, len(buf),YELLOW))
-                            else:   
-                                self.buffered_sendto(schro_local,buf,(self.lhost,self.lport))
-                                output("[o.o] %s Sent %d bytes to local from %s:%d\n" % (ts, len(buf),self.rhost,self.rport),YELLOW)
-                            resp_count+=1
+                            else:
+                                self.buffered_sendto(schro_local, buf, (self.lhost, self.lport))
+                                output("[o.o] %s Sent %d bytes to local from %s:%d\n" % (ts, len(buf), self.rhost, self.rport), YELLOW)
+                            resp_count += 1
                         plock.release()
 
-                    try: #udp port range case
-                        if s in schro_local: 
+                    try:  # udp port range case
+                        if s in schro_local:
                             plock.acquire()
 
-                            buf = self.outbound_handler(buf,self.lhost,self.rhost) 
+                            buf = self.outbound_handler(
+                                buf,
+                                self.lhost,
+                                self.rhost
+                            )
                             if byte_count and self.verbose:
                                 if byte_count < 0x2000:
                                     hexdump(buf)
                                 else:
-                                    output("[!_!] Truncated Message len %d!"%byte_count)
+                                    output("[!_!] Truncated Message len %d!" % byte_count)
 
                             if len(buf):
                                 plock.acquire()
-                                self.pkt_count+=1
+                                self.pkt_count += 1
                                 ts = datetime.now().strftime("%H:%M:%S.%f")
-                                active_udp = s # so we know where to throw packets back to 
-                                self.buffered_sendto(schro_remote,buf,(self.rhost,self.rport))
-                                output("[o.o] %s Sent %d bytes to remote (%s:%d)\n" % (ts,len(buf),self.rhost,self.rport),GREEN)
+                                active_udp = s
+                                # so we know where to throw packets back to
+                                self.buffered_sendto(
+                                    schro_remote,
+                                    buf,
+                                    (self.rhost, self.rport)
+                                )
+                                output("[o.o] %s Sent %d bytes to remote (%s:%d)\n" % (ts, len(buf), self.rhost, self.rport), GREEN)
 
                             plock.release()
 
-                     
                     except Exception as e:
-                        # will error unless schro_local is a list of sockets (i.e. port range).
+                        # will error unless schro_local is a list of sockets
+                        # (i.e. port range).
+                        print "Exception occurred: %s" % e
                         pass
-                        
+
                     if self.expected_resp_count > 0 and resp_count >= self.expected_resp_count:
                         break
 
                 if self.dont_kill and (resp_count < self.expected_resp_count or self.expected_resp_count == -1):
-                    continue 
-            
+                    continue
+
                 if not byte_count or len(exceptional):
                     if self.local_end_type == "ssl":
                         try:
-                            schro_local.shutdown(socket.SHUT_RDWR) 
-                        except:
+                            schro_local.shutdown(socket.SHUT_RDWR)
+                        except Exception as e:
+                            print "Exception occurred: %s" % e
                             pass
 
-                    
-                    if self.local_end_type in ConnectionBased: 
+                    if self.local_end_type in ConnectionBased:
                         schro_local.close()
                         if self.remote_end_type in ConnectionBased:
-                            schro_remote.close() 
-                        output("[-.-] No more data, closing connection (%s:%d<->%s:%d)\n" % (cli_addr[0],cli_addr[1],self.rhost,self.rport),ORANGE,plock)
-                        break          
+                            schro_remote.close()
+                        output("[-.-] No more data, closing connection (%s:%d<->%s:%d)\n" % (cli_addr[0], cli_addr[1], self.rhost, self.rport), ORANGE, plock)
+                        break
 
         except KeyboardInterrupt:
             pass
 
         self.exit_triggers()
 
-
     # Do anything that we need to do before exiting
     def exit_triggers(self):
 
         if self.fuzz_file:
             try:
-                self.fuzzerData.port = self.rport 
+                self.fuzzerData.port = self.rport
                 self.fuzzerData.setMessagesToFuzzFromString("0")
-                self.fuzzerData.writeToFile(self.fuzz_file,defaultComments=True) 
+                self.fuzzerData.writeToFile(self.fuzz_file,
+                                            defaultComments=True)
             except Exception as e:
-                output(str(e),YELLOW)
-                output("[-.-] Couldn't write fuzz data. Where's Mutiny?",RED)
+                output(str(e), YELLOW)
+                output("[-.-] Couldn't write fuzz data. Where's Mutiny?", RED)
 
-
-
-    # will need to filter frames based on mac addresses. 
-    # Only want mac addresses destined for either local_interface or remote_interface
-    def raw_proxy_loop(self,r_mac,r_int):
+    # will need to filter frames based on mac addresses. Only want mac
+    # addresses destined for either local_interface or remote_interface
+    def raw_proxy_loop(self, r_mac, r_int):
         # Code flow is rather different for AF_PACKET L2_raw
         # Constants from /usr/include/linux/if_ether.h
         # ETH_P_ALL = 0x0300
-        ETH_P_ALL = 0x0300 
+        ETH_P_ALL = 0x0300
         ETH_P_IP = 0x0800
 
-        LMAC = ''.join([chr(int(i,16)) for i in self.lhost.split(":")])
-        RMAC = ''.join([chr(int(i,16)) for i in self.rhost.split(":")])
-        LINTERFACE = self.lport 
+        LMAC = ''.join([chr(int(i, 16)) for i in self.lhost.split(":")])
+        RMAC = ''.join([chr(int(i, 16)) for i in self.rhost.split(":")])
+        LINTERFACE = self.lport
         RINTERFACE = self.rport
 
         if self.local_end_type == "passive":
             proto = ETH_P_ALL
         elif self.local_end_type == "bridge":
-            #non-promisc
+            # non-promisc
             proto = ETH_P_IP
-        
+
         # use a special mac to identify our stuff?
         # --l2_filter for that. Will be special string in frames to check for
         # frame must contain string or else we don't forward
 
         SIOCGIFHWADDR = 0x8927
-        r_sock = socket.socket(socket.AF_PACKET,socket.SOCK_RAW,proto)
+        r_sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, proto)
 
         if self.local_end_type == "bridge":
-            r_sock.bind((RINTERFACE,0))
+            r_sock.bind((RINTERFACE, 0))
 
-        #Get information for interfaces
-         
-        LOCAL_MAC_IOCTL = fcntl.ioctl(r_sock.fileno(),SIOCGIFHWADDR,struct.pack('256s',LINTERFACE[0:15]))
+        # Get information for interfaces
+
+        LOCAL_MAC_IOCTL = fcntl.ioctl(
+            r_sock.fileno(),
+            SIOCGIFHWADDR,
+            struct.pack('256s', LINTERFACE[0:15])
+        )
         LOCAL_INT_MAC = LOCAL_MAC_IOCTL[18:24]
-        REMOTE_MAC_IOCTL = fcntl.ioctl(r_sock.fileno(),SIOCGIFHWADDR,struct.pack('256s',RINTERFACE[0:15]))
+        REMOTE_MAC_IOCTL = fcntl.ioctl(
+            r_sock.fileno(),
+            SIOCGIFHWADDR,
+            struct.pack('256s', RINTERFACE[0:15])
+        )
         REMOTE_INT_MAC = REMOTE_MAC_IOCTL[18:24]
 
-        output("[@.@] Bound raw socket, filtering for (%s,%s)||(%s,%s)" % (LINTERFACE,macdump(LMAC),
-                                                                        RINTERFACE,macdump(RMAC)),GREEN)
+        output("[@.@] Bound raw socket, filtering for (%s,%s)||(%s,%s)" % (LINTERFACE,macdump(LMAC), RINTERFACE,macdump(RMAC)), GREEN)
 
         self.pkt_count = 0
         # how we determine direction of frame
         # filter = DST + SRC
-        inbound_remote = REMOTE_INT_MAC + RMAC 
+        inbound_remote = REMOTE_INT_MAC + RMAC
         outbound_remote = RMAC + REMOTE_INT_MAC
         # Don't care where it's coming from locally
-        inbound_local = LOCAL_INT_MAC + LMAC 
+        inbound_local = LOCAL_INT_MAC + LMAC
         outbound_local = LMAC + LOCAL_INT_MAC
         # Passthrough modes
         passive_inbound = RMAC + LMAC
         passive_outbound = LMAC + RMAC
 
         broadcast = "\xff\xff\xff\xff\xff\xff"
-        broadcast_outbound = broadcast + LMAC 
-    
+        broadcast_outbound = broadcast + LMAC
+
         # in order to act as a L2 proxy, we need 2 flows....
         # ([us] -> [lo])--Decept-->([eth0] -> [them])
         # ([us] <- [lo])<--Decept--([eth0] <- [them])
         # Also need to support passive
         # ([int1] <--Decept--> [int2]
-        
+
         sock_list = [r_sock]
-        if self.local_end_type=="bridge":
+        if self.local_end_type == "bridge":
             sock_list.append(self.server_socket)
 
-        #!TODO: clean up this cluster w/ebpf
+        # TODO: clean up this cluster w/ebpf
         while True:
             buff = ""
             try:
-                readable, __,exceptional = select.select(sock_list,[],sock_list,self.timeout)    
+                readable, __, exceptional = select.select(
+                    sock_list,
+                    [],
+                    sock_list,
+                    self.timeout
+                )
 
                 # if there's any sockets ready to read, get data
                 if self.local_end_type == "passive":
                     for s in readable:
-                        buff = self.get_raw_bytes(s) 
+                        buff = self.get_raw_bytes(s)
                         if not buff:
                             # not meant for us, or filtered
                             break
                         # What about broadcasts??
                         # MAC MTU 1500
                         if buff[0:12] == broadcast_outbound:
-                                output(macdump(buff[0:6]) + " " + macdump(buff[6:12]) + " Broadcast >>",YELLOW)
-                                buff = self.outbound_handler(buff)
-                                if self.L2_forward:
-                                    buff = RMAC + REMOTE_INT_MAC + buff[:12]
-                                    self.buffered_sendto(r_sock,buff,(RINTERFACE,0))
+                            output(macdump(buff[0:6]) + " " + macdump(buff[6:12]) + " Broadcast >>", YELLOW)
+                            buff = self.outbound_handler(buff)
+                            if self.L2_forward:
+                                buff = RMAC + REMOTE_INT_MAC + buff[:12]
+                                self.buffered_sendto(
+                                    r_sock,
+                                    buff,
+                                    (RINTERFACE, 0)
+                                )
 
                         elif buff[0:6] == broadcast:
-                                output(macdump(buff[0:6]) + " " + macdump(buff[6:12]) + " << Broadcast",YELLOW)
-                                buff = self.inbound_handler(buff) 
-                                if self.L2_forward:
-                                    buff = LOCAL_INT_MAC + LMAC + buff[:12]
-                                    self.buffered_sendto(r_sock,buff,(LINTERFACE,0))
+                            output(macdump(buff[0:6]) + " " + macdump(buff[6:12]) + " << Broadcast", YELLOW)
+                            buff = self.inbound_handler(buff)
+                            if self.L2_forward:
+                                buff = LOCAL_INT_MAC + LMAC + buff[:12]
+                                self.buffered_sendto(
+                                    r_sock,
+                                    buff,
+                                    (LINTERFACE, 0)
+                                )
 
-
-                        elif buff[0:12] == inbound_remote: 
-                                output(macdump(buff[0:6]) + " " + macdump(buff[6:12]) + " << Remote",YELLOW)
-                                buff = self.inbound_handler(buff) 
-                                if self.L2_forward:
-                                    buff = LOCAL_INT_MAC + LMAC + buff[:12]
-                                    self.buffered_sendto(r_sock,buff,(LINTERFACE,0))
+                        elif buff[0:12] == inbound_remote:
+                            output(macdump(buff[0:6]) + " " + macdump(buff[6:12]) + " << Remote", YELLOW)
+                            buff = self.inbound_handler(buff)
+                            if self.L2_forward:
+                                buff = LOCAL_INT_MAC + LMAC + buff[:12]
+                                self.buffered_sendto(
+                                    r_sock,
+                                    buff,
+                                    (LINTERFACE, 0)
+                                )
 
                         elif buff[0:12] == outbound_remote:
-                                output(macdump(buff[0:6]) + " " + macdump(buff[6:12]) + " Remote >>",YELLOW)
-                                buff = self.outbound_handler(buff)
-                                if self.L2_forward:
-                                    buff = RMAC + REMOTE_INT_MAC + buff[:12]
-                                    self.buffered_sendto(r_sock,buff,(RINTERFACE,0))
+                            output(macdump(buff[0:6]) + " " + macdump(buff[6:12]) + " Remote >>", YELLOW)
+                            buff = self.outbound_handler(buff)
+                            if self.L2_forward:
+                                buff = RMAC + REMOTE_INT_MAC + buff[:12]
+                                self.buffered_sendto(
+                                    r_sock,
+                                    buff,
+                                    (RINTERFACE, 0)
+                                )
 
-                        elif buff[0:12] == inbound_local: 
-                                output(macdump(buff[0:6]) + " " + macdump(buff[6:12]) + " << Local",CYAN)
-                                buff = self.inbound_handler(buff) 
-                                if self.L2_forward:
-                                    buff = LOCAL_INT_MAC + LMAC + buff[:12]
-                                    self.buffered_sendto(r_sock,buff,(LINTERFACE,0))
+                        elif buff[0:12] == inbound_local:
+                            output(macdump(buff[0:6]) + " " + macdump(buff[6:12]) + " << Local",CYAN)
+                            buff = self.inbound_handler(buff)
+                            if self.L2_forward:
+                                buff = LOCAL_INT_MAC + LMAC + buff[:12]
+                                self.buffered_sendto(
+                                    r_sock,
+                                    buff,
+                                    (LINTERFACE, 0)
+                                )
 
                         elif buff[0:12] == outbound_local:
-                                output(macdump(buff[0:6]) + " " + macdump(buff[6:12]) + " Local >>",CYAN)
-                                buff = self.outbound_handler(buff)
-                                if self.L2_forward:
-                                    buff = RMAC + REMOTE_INT_MAC + buff[:12]
-                                    self.buffered_sendto(r_sock,buff,(RINTERFACE,0))
+                            output(macdump(buff[0:6]) + " " + macdump(buff[6:12]) + " Local >>",CYAN)
+                            buff = self.outbound_handler(buff)
+                            if self.L2_forward:
+                                buff = RMAC + REMOTE_INT_MAC + buff[:12]
+                                self.buffered_sendto(
+                                    r_sock,
+                                    buff,
+                                    (RINTERFACE, 0)
+                                )
 
                         elif buff[0:12] == passive_outbound:
-                                output(macdump(buff[0:6]) + " " + macdump(buff[6:12]) + " >> outbound >>",PURPLE)
-                                buff = self.outbound_handler(buff)
+                            output(macdump(buff[0:6]) + " " + macdump(buff[6:12]) + " >> outbound >>", PURPLE)
+                            buff = self.outbound_handler(buff)
 
-                        elif buff[0:12] == passive_inbound: 
-                                output(macdump(buff[0:6]) + " " + macdump(buff[6:12]) + " << inbound <<",PURPLE)
-                                buff = self.inbound_handler(buff) 
+                        elif buff[0:12] == passive_inbound:
+                            output(macdump(buff[0:6]) + " " + macdump(buff[6:12]) + " << inbound <<", PURPLE)
+                            buff = self.inbound_handler(buff)
 
                         else:
                             if DEBUGGING:
                                 print "DST:" + macdump(buff[0:6]) + " SRC:" + macdump(buff[6:12])
                             break
 
-                        self.pkt_count+=1  
+                        self.pkt_count += 1
 
                 elif self.local_end_type == "bridge":
                     for s in readable:
-                        buff = self.get_raw_bytes(s) 
+                        buff = self.get_raw_bytes(s)
                         if len(buff):
                             if s == self.server_socket:
                                 self.outbound_handler(buff)
-                                self.buffered_sendto(r_sock,buff,(RINTERFACE,0))
+                                self.buffered_sendto(
+                                    r_sock,
+                                    buff,
+                                    (RINTERFACE, 0)
+                                )
                             elif s == r_sock:
                                 self.inbound_handler(buff)
-                                self.buffered_sendto(self.server_socket,buff,(LINTERFACE,0))
+                                self.buffered_sendto(
+                                    self.server_socket,
+                                    buff,
+                                    (LINTERFACE, 0)
+                                )
                             if self.verbose:
                                 hexdump(buff)
 
-                if len(exceptional): #error on a socket, break
+                if len(exceptional):  # error on a socket, break
                     break
-             
+
             except KeyboardInterrupt:
                 r_sock.close()
                 self.shutdown()
@@ -1310,89 +1556,86 @@ class DeceptProxy():
         self.exit_triggers()
         return
 
-    def get_raw_bytes(self,sock):
+    def get_raw_bytes(self, sock):
         ret = ""
         sock.settimeout(self.timeout)
         # examine the mac addresses first
         # ('eth0', 2048, 4, 1, '\x00\x0c)\xc0\\\x89')
-        tmp,addr = sock.recvfrom(self.l2_mtu) 
+        tmp, addr = sock.recvfrom(self.l2_mtu)
         interface = addr[0]
-        dst = addr[4] 
+        dst = addr[4]
 
         if interface != self.lport and interface != self.rport:
             return ""
-        
+
         if self.l2_filter and self.l2_filter not in tmp:
             # drop it if we're filtering and no hit
             # perhaps better to do some other method?
             # e.g. re.match/etc
             return ""
 
-            
-        return tmp 
+        return tmp
 
-
-    def monitor_loop(self,mon_sock,pcap_fd,kill_flag):
+    def monitor_loop(self, mon_sock, pcap_fd, kill_flag):
         mon_sock.settimeout(self.timeout)
         while not kill_flag.is_set():
             try:
-                packet,addr = mon_sock.recvfrom(self.l2_mtu) 
-                #output("got stuff!",GREEN)
+                packet, addr = mon_sock.recvfrom(self.l2_mtu)
+                # output("got stuff!",GREEN)
                 packlen = len(packet)
-                
-                #print "Packlen: %d" % packlen
+
+                # print "Packlen: %d" % packlen
                 pcap_record = pcap_record_hdr(packlen)
 
                 if self.snaplen < packlen:
-                    #pcap_record.orig_len = self.snaplen
-                    packlen = self.snaplen 
-                
-                   
+                    # pcap_record.orig_len = self.snaplen
+                    packlen = self.snaplen
+
                 # write headers for packet
                 packet_header = pcap_record.get_byte_array()
                 pcap_fd.write(packet_header)
-                #print "writing! %s " % packet_header
+                # print "writing! %s " % packet_header
                 # write packet up to SNAPLEN
                 pcap_fd.write(packet[0:self.snaplen])
-                #print "writing! %s " % repr(packet[0:self.snaplen])
+                # print "writing! %s " % repr(packet[0:self.snaplen])
 
             except Exception as e:
-                #print e
+                print "Exception occurred: %s" % e
                 pass
-                
+
         pcap_fd.close()
 
-        
-
-
-        
-
-
-    def arp_poisoner(self,config_file,interface,killswitch):
+    def arp_poisoner(self, config_file, interface, killswitch):
 
         arp_poison_list = []
-        
+
         try:
             confbuf = ""
             conflist = []
-            with open(config_file,"r") as f:
-                confbuf = f.read() 
-            for line in filter(None,confbuf.split("\n")): 
+            with open(config_file, "r") as f:
+                confbuf = f.read()
+            for line in filter(None, confbuf.split("\n")):
                 if line[0] != "#":
                     conflist.append(line)
 
             if len(conflist) > 0:
                 for entry in conflist:
                     try:
-                        mac1,mac2,ip1,ip2 = entry.split("|") 
+                        mac1, mac2, ip1, ip2 = entry.split("|")
                         if len(mac1) and len(mac2) and len(ip1) and len(ip2):
-                            output("[!.!] Poisoning %s | %s | %s | %s" % (mac1,mac2,ip1,ip2),PURPLE)
-                            
-                            m1 = ''.join(chr(int(c,16)) for c in mac1.split(":"))
-                            m2 = ''.join(chr(int(c,16)) for c in mac2.split(":"))
-                            ip1 = ''.join(chr(int(c,10)) for c in ip1.split("."))
-                            ip2 = ''.join(chr(int(c,10)) for c in ip2.split("."))
-                            arp_poison_list.append((m1,m2,ip1,ip2))
+                            output(
+                                "[!.!] Poisoning %s | %s | %s | %s" % (mac1,
+                                                                       mac2,
+                                                                       ip1,
+                                                                       ip2),
+                                PURPLE
+                            )
+
+                            m1 = ''.join(chr(int(c, 16)) for c in mac1.split(":"))
+                            m2 = ''.join(chr(int(c, 16)) for c in mac2.split(":"))
+                            ip1 = ''.join(chr(int(c, 10)) for c in ip1.split("."))
+                            ip2 = ''.join(chr(int(c, 10)) for c in ip2.split("."))
+                            arp_poison_list.append((m1, m2, ip1, ip2))
                     except Exception as e:
                         print e
                         pass
@@ -1403,123 +1646,137 @@ class DeceptProxy():
             print e
             pass
 
-
-        poison_sock = socket.socket(socket.AF_PACKET,socket.SOCK_RAW,0x300)
-        LOCAL_MAC_IOCTL = fcntl.ioctl(poison_sock.fileno(),0x8927,struct.pack('256s',interface[0:15]))
+        poison_sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, 0x300)
+        LOCAL_MAC_IOCTL = fcntl.ioctl(
+            poison_sock.fileno(),
+            0x8927,
+            struct.pack('256s', interface[0:15])
+        )
         LOCAL_MAC = LOCAL_MAC_IOCTL[18:24]
 
-        #buf = dst_addr + src_addr 
-        buf =  "??????" + "!!!!!!"
-        buf += "\x08\x06" # arp
-        buf += "\x00\x01" #ethernet
-        buf += "\x08\x00" #ipv4
-        buf += "\x06" # hardware size
-        buf += "\x04" # protocol size
-        buf += "\x00\x02" # arp opcode (reply)
-        #buf += our_mac # 
-        #buf += our_IP  # 
-        #buf += target_mac #
-        #buf += target_IP  # 
+        # buf = dst_addr + src_addr
+        buf = "??????" + "!!!!!!"
+        buf += "\x08\x06"  # arp
+        buf += "\x00\x01"  # ethernet
+        buf += "\x08\x00"  # ipv4
+        buf += "\x06"  # hardware size
+        buf += "\x04"  # protocol size
+        buf += "\x00\x02"  # arp opcode (reply)
+        # buf += our_mac #
+        # buf += our_IP  #
+        # buf += target_mac #
+        # buf += target_IP  #
 
         while not killswitch.is_set():
             try:
-                for mac1,mac2,ip1,ip2 in arp_poison_list:
-                    frame1 = buf.replace("??????",mac1) #dst
-                    frame1 = frame1.replace("!!!!!!",LOCAL_MAC) #src
-                    frame1 += LOCAL_MAC 
-                    frame1 += ip2 
-                    frame1 += mac1 
+                for mac1, mac2, ip1, ip2 in arp_poison_list:
+                    frame1 = buf.replace("??????", mac1)  # dst
+                    frame1 = frame1.replace("!!!!!!", LOCAL_MAC)  # src
+                    frame1 += LOCAL_MAC
+                    frame1 += ip2
+                    frame1 += mac1
                     frame1 += ip1
-                    ret = poison_sock.sendto(frame1,(interface,0x0))
+                    ret = poison_sock.sendto(frame1, (interface, 0x0))
 
-                    frame2 = buf.replace("??????",mac2) #dst
-                    frame2 = frame2.replace("!!!!!!",LOCAL_MAC) #src
-                    frame2 += LOCAL_MAC 
-                    frame2 += ip1 
-                    frame2 += mac2 
+                    frame2 = buf.replace("??????",mac2)  # dst
+                    frame2 = frame2.replace("!!!!!!",LOCAL_MAC)  # src
+                    frame2 += LOCAL_MAC
+                    frame2 += ip1
+                    frame2 += mac2
                     frame2 += ip2
-                    ret = poison_sock.sendto(frame2,(interface,0x0))
+                    ret = poison_sock.sendto(frame2, (interface, 0x0))
                 sleep(2)
 
             except KeyboardInterrupt:
                 # do some fixup (hopefully)
-                frame1 = buf.replace("??????",mac1) #dst
-                frame1 = frame1.replace("!!!!!!",mac2) #src
-                frame1 += mac2 
-                frame1 += ip2 
-                frame1 += mac1 
+                frame1 = buf.replace("??????", mac1)  # dst
+                frame1 = frame1.replace("!!!!!!",mac2)  # src
+                frame1 += mac2
+                frame1 += ip2
+                frame1 += mac1
                 frame1 += ip1
-                ret = poison_sock.sendto(frame1,(interface,0x0))
+                ret = poison_sock.sendto(frame1, (interface, 0x0))
 
-                frame2 = buf.replace("??????",mac2) #dst
-                frame2 = frame1.replace("!!!!!!",mac1) #src
-                frame2 += mac1 
-                frame2 += ip1 
-                frame2 += mac2 
+                frame2 = buf.replace("??????",mac2)  # dst
+                frame2 = frame1.replace("!!!!!!", mac1)  # src
+                frame2 += mac1
+                frame2 += ip1
+                frame2 += mac2
                 frame2 += ip2
-                ret = poison_sock.sendto(frame2,(interface,0x0))
+                ret = poison_sock.sendto(frame2, (interface, 0x0))
                 return
 
-    def inbound_handler(self,inbound,src="",dst=""):
-        #write_packet_header(inbound,src,dst)
-        self.write_packet_data(inbound,1) 
+    def inbound_handler(self, inbound, src="", dst=""):
+        # write_packet_header(inbound,src,dst)
+        self.write_packet_data(inbound, 1)
 
         if self.dumpraw:
-            dstfile = join(getcwd(),self.dumpraw,"%s-%d-inbound"%(self.thread_id,self.pkt_count))
-            with open(dstfile,'wb') as f:
+            dstfile = join(
+                getcwd(),
+                self.dumpraw,
+                "%s-%d-inbound" % (self.thread_id, self.pkt_count)
+            )
+            with open(dstfile, 'wb') as f:
                 f.write(inbound)
 
         if self.inbound_hook:
 
-            #output("[<.<] Pre-hook datalen: %d" %len(inbound),CYAN)
-            inbound = self.inbound_hook(inbound,self.userdata)
-            #output("[<.<] Pre-hook datalen: %d" %len(inbound),CYAN)
+            # output("[<.<] Pre-hook datalen: %d" %len(inbound),CYAN)
+            inbound = self.inbound_hook(inbound, self.userdata)
+            # output("[<.<] Pre-hook datalen: %d" %len(inbound),CYAN)
 
         if self.tapmode:
             packet = self.inbound_dummy + inbound
-            packet = packet.replace("L4TOTESHEADER",struct.pack(">H",len(inbound)))
+            packet = packet.replace(
+                "L4TOTESHEADER",
+                struct.pack(">H", len(inbound))
+            )
 
-            #                     (l3stuff+l2 stuff+ string=>field bytes) 
+            #                     (l3stuff+l2 stuff+ string=>field bytes)
             l3len = (len(packet) - (0x14 + 0xC + (len("L3TOTESHEADER")-2)))
-            packet = packet.replace("L3TOTESHEADER",struct.pack(">H",l3len))
+            packet = packet.replace("L3TOTESHEADER", struct.pack(">H", l3len))
 
-            self.tapsock.sendto( packet, ("127.0.0.1",0))
+            self.tapsock.sendto(packet, ("127.0.0.1", 0))
 
         return inbound
 
-
-    def outbound_handler(self,outbound,src="",dst=""):
-        #write_packet_header(outbound,src,dst) 
-        self.write_packet_data(outbound,0)    
+    def outbound_handler(self, outbound, src="", dst=""):
+        # write_packet_header(outbound,src,dst)
+        self.write_packet_data(outbound, 0)
 
         if self.dumpraw:
-            dstfile = join(getcwd(),self.dumpraw,"%s-%d-outbound"%(self.thread_id,self.pkt_count))
-            with open(dstfile,'wb') as f:
+            dstfile = join(
+                getcwd(),
+                self.dumpraw,
+                "%s-%d-outbound" % (self.thread_id, self.pkt_count)
+            )
+            with open(dstfile, 'wb') as f:
                 f.write(outbound)
 
         if self.outbound_hook:
-            #output("[>.>] Pre-hook datalen: %d" %len(outbound),CYAN)
-            outbound = self.outbound_hook(outbound,self.userdata)
-            #output("[>.>] Post-hook datalen: %d" %len(outbound),CYAN)
+            # output("[>.>] Pre-hook datalen: %d" %len(outbound),CYAN)
+            outbound = self.outbound_hook(outbound, self.userdata)
+            # output("[>.>] Post-hook datalen: %d" %len(outbound),CYAN)
 
         if self.tapmode:
             packet = self.outbound_dummy + outbound
-            packet = packet.replace("L4TOTESHEADER",struct.pack(">H",len(outbound)))
+            packet = packet.replace(
+                "L4TOTESHEADER",
+                struct.pack(">H", len(outbound))
+            )
 
-            #                     (l3stuff+l2 stuff+ string=>field bytes) 
+            #                     (l3stuff+l2 stuff+ string=>field bytes)
             l3len = (len(packet) - (0x14 + 0xC + (len("L3TOTESHEADER")-2)))
-            packet = packet.replace("L3TOTESHEADER",struct.pack(">H",l3len))
-            self.tapsock.sendto( packet, ("127.0.0.1",0))
-
+            packet = packet.replace("L3TOTESHEADER", struct.pack(">H", l3len))
+            self.tapsock.sendto(packet, ("127.0.0.1", 0))
 
             pass
 
         return outbound
 
-
-    def write_packet_data(self,packet,direction):
+    def write_packet_data(self, packet, direction):
         if not len(packet):
-            return    
+            return
 
         if self.fuzzerData:
             m = mutiny.Message()
@@ -1529,169 +1786,195 @@ class DeceptProxy():
                 m.direction = "inbound"
             try:
                 if len(self.fuzzerData.messageCollection.messages) == 0:
-                    m.appendMessageFrom(sourceType=2,message=packet,attributes="fuzz")
+                    m.appendMessageFrom(
+                        sourceType=2,
+                        message=packet,
+                        attributes="fuzz"
+                    )
                 else:
-                    m.appendMessageFrom(sourceType=2,message=packet,attributes="")
-            except:
-                #older verison of mutiny
+                    m.appendMessageFrom(
+                        sourceType=2,
+                        message=packet,
+                        attributes=""
+                    )
+            except Exception as e:
+                print "Exception occurred: %e" % e
+                # older verison of mutiny
                 if len(self.fuzzerData.messageCollection.messages) == 0:
-                    m.setMessageFrom(sourceType=2,message=packet,isFuzzed=True)
+                    m.setMessageFrom(
+                        sourceType=2,
+                        message=packet,
+                        isFuzzed=True
+                    )
                 else:
-                    m.appendMessageFrom(sourceType=2,message=packet,isFuzzed=False)
+                    m.appendMessageFrom(
+                        sourceType=2,
+                        message=packet,
+                        isFuzzed=False
+                    )
 
             self.fuzzerData.messageCollection.addMessage(m)
-            
-        
 
-    def buffered_send(self,sock,data):
+    def buffered_send(self, sock, data):
         send_count = 0
         while send_count < len(data):
             try:
                 # if we need a data limit cap
                 data_chunk = data[send_count:send_count+self.l4_MTU]
-            except:
+            except Exception as e:
+                print "Exception occurred: %s" % e
                 data_chunk = data[send_count:]
 
             send_count += sock.send(data_chunk)
 
-    def buffered_sendto(self,sock,data,dst_tuple):
+    def buffered_sendto(self, sock, data, dst_tuple):
         send_count = 0
         while send_count < len(data):
             try:
                 # if we need a data limit cap
                 data_chunk = data[send_count:send_count+self.l4_MTU]
-            except:
+            except Exception as e:
+                print "Exception occurred: %s" % e
                 data_chunk = data[send_count:]
 
-            send_count += sock.sendto(data_chunk,dst_tuple)
-
-    
-
-
-
+            send_count += sock.sendto(data_chunk, dst_tuple)
 #####################################################
-### End class DeceptProxy() 
+# End class DeceptProxy()
 #####################################################
 
-#assume all unsigned
-def raw_to_cstruct_args(raw_bytes,cstruct):
+
+# assume all unsigned
+def raw_to_cstruct_args(raw_bytes, cstruct):
     if len(raw_bytes) != sizeof(cstruct):
-        output("raw_to_cstruct: len mismatch: %d,%d"%(len(raw_bytes),sizeof(cstruct)),YELLOW)
-        raise 
+        output(
+            "raw_to_cstruct: len mismatch: %d,%d" % (len(raw_bytes),
+                                                     sizeof(cstruct)),
+            YELLOW
+        )
+        raise
 
     fmtstr = ""
     for f in cstruct._fields_:
         type_size = sizeof(f[1])
 
         if type_size == 1:
-                fmtstr+="B"
+            fmtstr += "B"
         elif type_size == 2:
-                fmtstr+="H"
+            fmtstr += "H"
         elif type_size == 4 or type_size == 8:
-                fmtstr+="L"
+            fmtstr += "L"
         else:
-           fmtstr+="%ds" % type_size
+            fmtstr += "%ds" % type_size
 
-    return struct.unpack(fmtstr,raw_bytes)
+    return struct.unpack(fmtstr, raw_bytes)
 
 
 def macdump(src):
     return ':'.join(["%02x" % ord(c) for c in src])
 
-#!TODO: compress consecutive repeats of chars.
-def hexdump(src,color,length=16):
+
+# TODO: compress consecutive repeats of chars.
+def hexdump(src, color, length=16):
     # Licensed with PSF
     # http://code.activestate.com/recipes/142812-hex-dumper
     # with minor edits
     if not src:
         return
 
-    result=[]
-    digits = 4 if isinstance(src,unicode) else 2
-    for i in xrange(0,len(src),length):
-        
-        s=src[i:i+length]
-        hexa = b' '.join(["%0*x" %(digits,ord(x)) for x in s]) 
+    result = []
+    digits = 4 if isinstance(src, unicode) else 2
+    for i in xrange(0, len(src), length):
+
+        s = src[i:i+length]
+        hexa = b' '.join(["%0*x" % (digits, ord(x)) for x in s])
 
         text = b''.join([x if 0x20 <= ord(x) < 0x7f else b'.' for x in s])
-        result.append(b"%04x   %-*s   %s" % (i,length*(digits+1),hexa, text))
+        result.append(b"%04x   %-*s   %s" % (i, length*(digits+1), hexa, text))
 
     if color:
-        output(b'\n'.join(result),color)
+        output(b'\n'.join(result), color)
     else:
         output(b'\n'.join(result))
 
 
-
-def dumb_arg_helper(option,default=None,required=False):
+def dumb_arg_helper(option, default=None, required=False):
     try:
         optionIndex = sys.argv.index(option)
         # first 4 args should be lhost/lport/rhost/rport
         if optionIndex <= 4:
-            output("[>.>] Missing Option: %s" % (option),RED)
+            output("[>.>] Missing Option: %s" % (option), RED)
             sys.exit()
 
         if "--" in sys.argv[optionIndex+1] and required:
-            output("[>.>] Please provide valid type of %s" % (option),RED)
+            output("[>.>] Please provide valid type of %s" % (option), RED)
             sys.exit()
 
         return sys.argv[optionIndex+1]
 
-    except:
+    except Exception as e:
+        print "Exception occurred: %s" % e
         if default and not required:
             return default
         elif default == 0:
             return default
         elif required and option in sys.argv:
-            output("[>.>] Please provide valid type of %s" % (option),RED)
+            output("[>.>] Please provide valid type of %s" % (option), RED)
             sys.exit()
-            
-        
-        
+
+
 def main():
-    output("[<_<] Decept proxy/sniffer [>_>]\n",CYAN)
+    output("[<_<] Decept proxy/sniffer [>_>]\n", CYAN)
 
     if len(sys.argv[1:]) < 4:
         output(usage)
-        output("[^.^] /Decept Proxy/sniffer [^.^]",CYAN)
+        output("[^.^] /Decept Proxy/sniffer [^.^]", CYAN)
         sys.exit(0)
-    
 
-    lhost = sys.argv[1] 
-    rhost = sys.argv[3] 
+    lhost = sys.argv[1]
+    rhost = sys.argv[3]
     try:
         lport = int(sys.argv[2])
-        rport = int(sys.argv[4]) 
-    except:
+        rport = int(sys.argv[4])
+    except Exception as e:
+        print "Exception occurred: %s" % e
         lport = sys.argv[2]
         rport = sys.argv[4]
 
     if (rport == lport) and (rhost == lhost) and "--really" not in sys.argv:
-        output("[>_>] Really? If you really want to see this, use with --really flag",YELLOW) 
-        output("[<_<] Protip: it's not pretty",PURPLE)
+        output("[>_>] Really? If you really want to see this, use with --really flag", YELLOW)
+        output("[<_<] Protip: it's not pretty", PURPLE)
         sys.exit()
 
-    
     try:
 
         # grab/validate the endpoints
-        remote_end_type = dumb_arg_helper("-r","tcp") 
+        remote_end_type = dumb_arg_helper("-r", "tcp")
         if remote_end_type not in ValidEndpoints and remote_end_type not in PROTO.keys():
-            output("[x.x] Invalid remoteEnd given, exiting!") 
+            output("[x.x] Invalid remoteEnd given, exiting!")
             sys.exit()
 
-        local_end_type = dumb_arg_helper("-l","tcp")
+        local_end_type = dumb_arg_helper("-l", "tcp")
         if local_end_type not in ValidEndpoints and local_end_type not in PROTO.keys():
-            output("[x.x] Invalid localEnd given, exiting!",RED) 
+            output("[x.x] Invalid localEnd given, exiting!", RED)
             sys.exit()
 
-        lcert = dumb_arg_helper("--lcert","cert.pem")
-        lkey = dumb_arg_helper("--lkey","key.pem")
+        lcert = dumb_arg_helper("--lcert", "cert.pem")
+        lkey = dumb_arg_helper("--lkey", "key.pem")
 
-        proxy = DeceptProxy(lhost,lport,rhost,rport,local_end_type,remote_end_type,False,lcert,lkey)
+        proxy = DeceptProxy(
+            lhost,
+            lport,
+            rhost,
+            rport,
+            local_end_type,
+            remote_end_type,
+            False,
+            lcert,
+            lkey
+        )
 
         # Take care of all switches
-        proxy.recv_first = True if "--recv_first" in sys.argv else False   
+        proxy.recv_first = True if "--recv_first" in sys.argv else False
         proxy.pps = True if "--pps" in sys.argv else False
         proxy.loglast = True if "--loglast" in sys.argv else False
         proxy.L2_forward = True if "--L2_forward" in sys.argv else False
@@ -1700,100 +1983,96 @@ def main():
         proxy.dont_kill = True if "--dont_kill" in sys.argv else False
         proxy.tapmode = True if "--tap" in sys.argv else False
 
-        #next, ints and strings that don't require processing
-        proxy.timeout = float(dumb_arg_helper("--timeout",2))
-        proxy.expected_resp_count = int(dumb_arg_helper("--expresp",-1))
+        # next, ints and strings that don't require processing
+        proxy.timeout = float(dumb_arg_helper("--timeout", 2))
+        proxy.expected_resp_count = int(dumb_arg_helper("--expresp", -1))
 
         # pcap options
         proxy.pcap = dumb_arg_helper("--pcap")
-        proxy.snaplen = int(dumb_arg_helper("--snaplen",65535)) 
-        proxy.tcp_MTU = int(dumb_arg_helper("--max-packet-len",30000))
+        proxy.snaplen = int(dumb_arg_helper("--snaplen", 65535))
+        proxy.tcp_MTU = int(dumb_arg_helper("--max-packet-len", 30000))
         outbound_hook = dumb_arg_helper("--outhook")
 
-        proxy.fuzz_file = dumb_arg_helper("--fuzzer","",True)  
-        proxy.dumpraw = dumb_arg_helper("--dumpraw","",True) 
-        proxy.l2_MTU = int(dumb_arg_helper("--mtu",1500))
+        proxy.fuzz_file = dumb_arg_helper("--fuzzer", "", True)
+        proxy.dumpraw = dumb_arg_helper("--dumpraw", "", True)
+        proxy.l2_MTU = int(dumb_arg_helper("--mtu", 1500))
         proxy.l2_filter = dumb_arg_helper("--l2_filter")
         proxy.rbind_addr = dumb_arg_helper("--rbind_addr") or "0.0.0.0"
-        proxy.rbind_port = int(dumb_arg_helper("--rbind_port",0)) 
+        proxy.rbind_port = int(dumb_arg_helper("--rbind_port", 0))
         proxy.udp_port_range = dumb_arg_helper("--udppr")
 
-        #remote ssl params, if needed.
+        # remote ssl params, if needed.
         tmp_key = dumb_arg_helper("--rkey")
         tmp_cert = dumb_arg_helper("--rcert")
         if (tmp_key and tmp_cert) or tmp_cert:
-            proxy.remote_keyfile = tmp_key 
-            proxy.remote_certfile = tmp_cert 
-       
+            proxy.remote_keyfile = tmp_key
+            proxy.remote_certfile = tmp_cert
 
-        proxy.poison_file  = dumb_arg_helper("--poison")
+        proxy.poison_file = dumb_arg_helper("--poison")
         proxy.poison_int = dumb_arg_helper("--poison_int")
-        
 
         proxy.remote_verify = dumb_arg_helper("--rverify")
-        
 
         # look for and parse the files first...
         hookfile = dumb_arg_helper("--hookfile")
-        
+
         if hookfile:
             import imp
             # if inbound_hook == outbound_hook file, no biggie
             try:
-                imp.load_source("hooks",hookfile) 
-                try: 
+                imp.load_source("hooks", hookfile)
+                try:
                     proxy.inbound_hook = sys.modules["hooks"].inbound_hook
-                    output("Loaded inbound_hook from %s" % hookfile,YELLOW)
-                except:
+                    output("Loaded inbound_hook from %s" % hookfile, YELLOW)
+                except Exception as e:
+                    print "Exception occurred: %s" % e
                     pass
 
-                try: 
+                try:
                     proxy.outbound_hook = sys.modules["hooks"].outbound_hook
-                    output("Loaded outbound_hook from %s" % hookfile,YELLOW)
-                except:
+                    output("Loaded outbound_hook from %s" % hookfile, YELLOW)
+                except Exception as e:
+                    print "Exception occurred: %s" % e
                     pass
-                
+
             except Exception as e:
-                print e
+                print "Exception occurred: %s" % e
                 pass
-                
-    
-                
 
         for arg in sys.argv[4:]:
-            if "-" in arg and arg not in ValidCmdlineOptions: 
-                output("[?.?] Option %s not valid option. Typo?"%arg,YELLOW)
-                
+            if "-" in arg and arg not in ValidCmdlineOptions:
+                output("[?.?] Option %s not valid option. Typo?" % arg, YELLOW)
+
         proxy.server_loop()
     except KeyboardInterrupt:
-        output("\n[!.!] Interrupt received, exiting!\n",CYAN) 
+        output("\n[!.!] Interrupt received, exiting!\n", CYAN)
         proxy.killswitch.set()
-        
+
     proxy.shutdown()
     sys.exit(0)
 
 
+###########
+# DEFINES #
+###########
+# colors
+RED = '\033[31m'
+ORANGE = '\033[91m'
+GREEN = '\033[92m'
+LIME = '\033[99m'
+YELLOW = '\033[93m'
+BLUE = '\033[94m'
+PURPLE = '\033[95m'
+CYAN = '\033[96m'
+CLEAR = '\033[00m'
 
-##########
-##DEFINES#
-##########
-#colors
-RED='\033[31m'
-ORANGE='\033[91m'
-GREEN='\033[92m'
-LIME='\033[99m'
-YELLOW='\033[93m'
-BLUE='\033[94m'
-PURPLE='\033[95m'
-CYAN='\033[96m'
-CLEAR='\033[00m' 
 
-def output(inp,color=None,lock=None):
+def output(inp, color=None, lock=None):
     if lock:
         lock.acquire()
 
     if color:
-        sys.__stdout__.write("%s%s%s\n" % (color,str(inp),CLEAR)) 
+        sys.__stdout__.write("%s%s%s\n" % (color, str(inp), CLEAR))
         sys.__stdout__.flush()
     else:
         sys.__stdout__.write(str(inp)+"\n")
@@ -1802,80 +2081,92 @@ def output(inp,color=None,lock=None):
     if lock:
         lock.release()
 
+
 # Taken from socket module itself, doesn't seem like any
 # other L3 protocols are supported....
 PROTO = {
-    "ip":0,
-    "icmp":1,
-    "ggp":3,
-    "ipv4":4,
-    "ipip":4,
-    "tcp":6,
-    "udp":17,
-    "dstopts":60,
-    "egp":8,
-    "eon":80,
-    "esp":50,
-    "fragment":44,
-    "hello":63,
-    "hopopts":0,
-    "icmpv6":58,
-    "idp":22,
-    "igmp":2,
-    "ipcomp":108,
-    "ah":51,
-    "ipv6":41,
-    "gre":47,
-    "max":256,
-    "nd":77,
-    "none":59,
-    "pim":103,
-    "pup":12,
-    "raw":255,
-    "routing":43,
-    "rsvp":46,
-    "tp":29,
-    "xtp":36,
+    "ip": 0,
+    "icmp": 1,
+    "ggp": 3,
+    "ipv4": 4,
+    "ipip": 4,
+    "tcp": 6,
+    "udp": 17,
+    "dstopts": 60,
+    "egp": 8,
+    "eon": 80,
+    "esp": 50,
+    "fragment": 44,
+    "hello": 63,
+    "hopopts": 0,
+    "icmpv6": 58,
+    "idp": 22,
+    "igmp": 2,
+    "ipcomp": 108,
+    "ah": 51,
+    "ipv6": 41,
+    "gre": 47,
+    "max": 256,
+    "nd": 77,
+    "none": 59,
+    "pim": 103,
+    "pup": 12,
+    "raw": 255,
+    "routing": 43,
+    "rsvp": 46,
+    "tp": 29,
+    "xtp": 36,
 }
 
+
 class IP_PACKET(Structure):
-    _pack_=1
+    _pack_ = 1
     _fields_ = [
-    ("version", c_ubyte,4),
-    ("ihl", c_ubyte,4),
-    ("tos", c_ubyte),
-    ("length", c_ushort),
-    ("id", c_ushort),
-    ("flags", c_ubyte,3),
-    ("fragOffset", c_ushort,13),
-    ("ttl", c_ubyte),
-    ("proto", c_ubyte),
-    ("checksum", c_ushort),
-    ("ipSrc", c_uint),
-    ("ipDst", c_uint),
-    #("options", c_uint),
-    #("padding", c_ubyte * 2)
+        ("version", c_ubyte, 4),
+        ("ihl", c_ubyte, 4),
+        ("tos", c_ubyte),
+        ("length", c_ushort),
+        ("id", c_ushort),
+        ("flags", c_ubyte, 3),
+        ("fragOffset", c_ushort, 13),
+        ("ttl", c_ubyte),
+        ("proto", c_ubyte),
+        ("checksum", c_ushort),
+        ("ipSrc", c_uint),
+        ("ipDst", c_uint),
+        #("options", c_uint),
+        #("padding", c_ubyte * 2)
     ]
-    
+
 
 class ETH(Structure):
     # sooo apparently packed c_ulonglong bitfields just aren't portable:
     # https://mail.python.org/pipermail/python-list/2009-June/540937.html
-    # bleh. 
+    # bleh.
 
-    _pack_=1
+    _pack_ = 1
     _fields_ = [
-    ("ethDstHigh", c_uint),
-    ("ethDstLow", c_ushort),
-    ("ethSrcHigh", c_uint),
-    ("ethSrcLow", c_ushort),
-    ("type", c_ushort)
+        ("ethDstHigh", c_uint),
+        ("ethDstLow", c_ushort),
+        ("ethSrcHigh", c_uint),
+        ("ethSrcLow", c_ushort),
+        ("type", c_ushort)
     ]
 
 # End Raw Socket Structs
 
-ValidEndpoints = ["ssl","udp","tcp","bridge","passive","stdin","stdout","unix","dtls"]
-ConnectionBased = ["ssl","tcp"]
+ValidEndpoints = [
+    "ssl",
+    "udp",
+    "tcp",
+    "bridge",
+    "passive",
+    "stdin",
+    "stdout",
+    "unix",
+    "dtls"
+]
+ConnectionBased = ["ssl", "tcp"]
 
 usage = '''
 usage: decept.py <local_host> <local_port> <remote_host> <remote_port> [OPTIONS]
@@ -1992,10 +2283,10 @@ class pcap_hdr_t(LittleEndianStructure):
         ("snaplen", c_uint32),
         ("network", c_uint32),
     ]
-  
+
     def __repr__(self):
         return self.get_byte_str()
-       
+
     def get_byte_str(self):
         buf = ""
         for i in bytearray(self):
@@ -2005,10 +2296,10 @@ class pcap_hdr_t(LittleEndianStructure):
     def get_byte_array(self):
         return bytearray(self)
 
-#####################################
-## Pcap file header
-#####################################
 
+#####################################
+# Pcap file header
+#####################################
 def pcap_global_hdr(): 
     pcap_file = pcap_hdr_t(0xa1b2c3d4,0x2,0x4,0x0,0x0,0xffff,0x1)
     return pcap_file
